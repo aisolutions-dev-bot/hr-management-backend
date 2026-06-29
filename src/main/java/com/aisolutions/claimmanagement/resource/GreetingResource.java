@@ -1,4 +1,4 @@
-package com.aisolutions.projectmanagement.resource;
+package com.aisolutions.claimmanagement.resource;
 
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;

@@ -1,47 +1,39 @@
 package com.aisolutions.claimmanagement.service;
 
-import com.aisolutions.claimmanagement.client.OrganizationAuthClient;
 import com.aisolutions.claimmanagement.dto.UserDTO;
+import com.aisolutions.claimmanagement.service.auth.JwtClaimsExtractor;
 
 import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import org.eclipse.microprofile.rest.client.inject.RestClient;
-
 /**
- * Resolves the currently authenticated user.
- *
- * Delegates to the remote Organization Auth service (via OrganizationAuthClient).
- * On any failure (no token, service down, 401, etc.) it returns an anonymous
- * UserDTO so downstream code can proceed without NullPointerException —
- * the frontend currently defaults to "superdrew" until your login is wired up.
+ * Resolves the currently authenticated user from the JWT in the incoming
+ * request (no external auth call). Used for audit fields (EntryStaff,
+ * LastEditStaff). Falls back to "SYSTEM" when no staffId is present.
  */
 @ApplicationScoped
 public class CurrentUserService {
 
-    public static final String ANONYMOUS_STAFF_ID = "superdrew";
+    public static final String SYSTEM_USER = "SYSTEM";
 
     @Inject
-    @RestClient
-    OrganizationAuthClient authClient;
+    JwtClaimsExtractor jwtClaimsExtractor;
 
-    /**
-     * Returns the current user, or an anonymous fallback on any error.
-     * Never throws; never returns null.
-     */
-    public Uni<UserDTO> getCurrentUser() {
-        return authClient.getCurrentUser()
-            .onFailure().recoverWithItem(err -> {
-                System.err.println("[CurrentUserService] Auth lookup failed: " + err.getMessage());
-                return anonymous();
-            })
-            .onItem().ifNull().continueWith(this::anonymous);
+    /** Current user's staffId, or "SYSTEM" when the request carries no identity. */
+    public Uni<String> getCurrentUserLoginId() {
+        return Uni.createFrom().item(resolveStaffId());
     }
 
-    private UserDTO anonymous() {
-        UserDTO u = new UserDTO();
-        u.setStaffId(ANONYMOUS_STAFF_ID);
-        return u;
+    /** Current user as a UserDTO; never null — staffId defaults to "SYSTEM". */
+    public Uni<UserDTO> getCurrentUser() {
+        UserDTO user = new UserDTO();
+        user.setStaffId(resolveStaffId());
+        return Uni.createFrom().item(user);
+    }
+
+    private String resolveStaffId() {
+        String staffId = jwtClaimsExtractor.extractStaffId();
+        return (staffId == null || staffId.isBlank()) ? SYSTEM_USER : staffId;
     }
 }

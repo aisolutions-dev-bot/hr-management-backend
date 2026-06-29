@@ -10,4 +10,4 @@ pluginManagement {
     }
 }
 
-rootProject.name = "project-management-backend"
+rootProject.name = "hr-management-backend"

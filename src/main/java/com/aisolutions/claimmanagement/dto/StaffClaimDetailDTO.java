@@ -13,6 +13,7 @@ import java.time.LocalDateTime;
 public class StaffClaimDetailDTO {
 
     private Long uniqId;
+    private Long claimId;
     private String entryStaff;
     private LocalDateTime entryDate;
     private String lastEditStaff;
@@ -29,6 +30,14 @@ public class StaffClaimDetailDTO {
     private LocalDateTime receiptDate;
     private BigDecimal receiptAmount;
     private BigDecimal claimAmount;
+    private String currency;
+    private BigDecimal exchangeRate;
+
+    // Itemised approval (per-line)
+    private String status;
+    private String approvedBy;
+    private LocalDateTime approvedDate;
+    private String rejectReason;
 
     // Attachment metadata (if uploaded)
     private Long attachmentId;

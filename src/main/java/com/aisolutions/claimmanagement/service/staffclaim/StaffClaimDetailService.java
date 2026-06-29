@@ -21,7 +21,7 @@ import java.util.List;
  * Handles staff claim detail creation and retrieval.
  *
  * Saving flow:
- *   1. Validate + truncate fields to fit m17StaffClaimsDet VARCHAR(25) constraints
+ *   1. Validate + truncate fields to fit m18StaffClaimsDet VARCHAR(25) constraints
  *   2. Persist claim record → obtain generated UniqId
  *   3. If a photo was provided, upload it via AttachmentService with
  *      moduleType="STAFFCLAIMDET" and referenceCode={claim.UniqId}.
@@ -37,11 +37,11 @@ public class StaffClaimDetailService {
 
     public static final String MODULE_TYPE = "STAFFCLAIMDET";
 
-    // m17StaffClaimsDet column lengths — truncate inputs to match DDL
+    // m18StaffClaimsDet column lengths — truncate inputs to match DDL
     private static final int LEN_STAFF_ID = 25;
     private static final int LEN_PROJECT_ID = 25;
     private static final int LEN_CLAIM_TYPE = 25;
-    private static final int LEN_DESCRIPTION = 25;
+    private static final int LEN_DESCRIPTION = 100;
     private static final int LEN_MERCHANT_NAME = 25;
     private static final int LEN_RECEIPT_NUMBER = 25;
 
@@ -149,6 +149,12 @@ public class StaffClaimDetailService {
         e.setReceiptDate(dto.getReceiptDate());
         e.setReceiptAmount(dto.getReceiptAmount());
         e.setClaimAmount(dto.getClaimAmount());
+        e.setCurrency(dto.getCurrency());
+        e.setExchangeRate(dto.getExchangeRate());
+
+        // Link to the claim header + initial itemised-approval status
+        e.setClaimId(dto.getClaimId());
+        e.setStatus("PENDING");
 
         e.setEntryStaff(e.getStaffId());
         e.setEntryDate(now);
@@ -157,9 +163,15 @@ public class StaffClaimDetailService {
         return e;
     }
 
+    /** Public mapper used by {@link StaffClaimService} to render a claim's line items (no attachment lookup). */
+    public StaffClaimDetailDTO toDtoBasic(StaffClaimDetail e) {
+        return toDto(e, null, null);
+    }
+
     private StaffClaimDetailDTO toDto(StaffClaimDetail e, Long attachmentId, String attachmentPath) {
         StaffClaimDetailDTO dto = new StaffClaimDetailDTO();
         dto.setUniqId(e.getUniqId());
+        dto.setClaimId(e.getClaimId());
         dto.setStaffId(e.getStaffId());
         dto.setProjectId(e.getProjectId());
         dto.setClaimType(e.getClaimType());
@@ -170,6 +182,12 @@ public class StaffClaimDetailService {
         dto.setReceiptDate(e.getReceiptDate());
         dto.setReceiptAmount(e.getReceiptAmount());
         dto.setClaimAmount(e.getClaimAmount());
+        dto.setCurrency(e.getCurrency());
+        dto.setExchangeRate(e.getExchangeRate());
+        dto.setStatus(e.getStatus());
+        dto.setApprovedBy(e.getApprovedBy());
+        dto.setApprovedDate(e.getApprovedDate());
+        dto.setRejectReason(e.getRejectReason());
         dto.setEntryStaff(e.getEntryStaff());
         dto.setEntryDate(e.getEntryDate());
         dto.setLastEditStaff(e.getLastEditStaff());
