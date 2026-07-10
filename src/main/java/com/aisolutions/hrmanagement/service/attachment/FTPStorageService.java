@@ -1,5 +1,15 @@
 package com.aisolutions.hrmanagement.service.attachment;
 
+import org.apache.commons.net.ftp.FTP;
+import org.apache.commons.net.ftp.FTPClient;
+import org.apache.commons.net.ftp.FTPReply;
+import org.jboss.logging.Logger;
+
+import io.smallrye.mutiny.Uni;
+import io.vertx.mutiny.core.Vertx;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -7,203 +17,162 @@ import java.io.InputStream;
 import java.time.Duration;
 import java.util.UUID;
 
-import org.apache.commons.net.ftp.FTP;
-import org.apache.commons.net.ftp.FTPClient;
-import org.apache.commons.net.ftp.FTPReply;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
-
-import io.smallrye.mutiny.Uni;
-import jakarta.enterprise.context.ApplicationScoped;
-
 /**
- * Service for handling file storage via FTP.
+ * FTP storage service for HR Management attachments (staff-claim receipts).
  *
- * Files stored under: {basePath}/{moduleType}/{referenceCode}/{uniqueFileName}
- * Example: /pms-attachments/STAFFCLAIMDET/123/a1b2c3d4-receipt.jpg
+ * All credentials and path configuration are supplied at call time via
+ * {@link FtpConfig}, loaded from m07SystemParameters by
+ * {@link com.aisolutions.hrmanagement.service.SystemParameterService} — no
+ * FTP settings live in application.properties.
+ *
+ * The blocking Apache Commons Net calls run on a Vert.x worker thread
+ * ({@code executeBlocking}) so they never stall the reactive event loop.
  */
 @ApplicationScoped
 public class FTPStorageService {
 
-    @ConfigProperty(name = "ftp.host")
-    String host;
+    private static final Logger   LOG                = Logger.getLogger(FTPStorageService.class);
+    private static final int      CONNECT_TIMEOUT_MS = 30_000;
+    private static final Duration DATA_TIMEOUT       = Duration.ofSeconds(60);
 
-    @ConfigProperty(name = "ftp.port", defaultValue = "21")
-    int port;
+    @Inject
+    Vertx vertx;
 
-    @ConfigProperty(name = "ftp.username")
-    String username;
-
-    @ConfigProperty(name = "ftp.password")
-    String password;
-
-    @ConfigProperty(name = "ftp.base-path", defaultValue = "/pms-attachments")
-    String basePath;
-
-    private static final int CONNECT_TIMEOUT_MS = 30000;
-    private static final Duration DATA_TIMEOUT = Duration.ofSeconds(60);
-
-    public Uni<String> uploadFile(byte[] fileData, String moduleType, String referenceCode, String originalName) {
-        return Uni.createFrom().item(() -> {
-            FTPClient ftpClient = new FTPClient();
+    /**
+     * Upload a file to FTP. Returns the full remote path of the stored file.
+     *
+     * @param fileData      raw bytes
+     * @param directoryPath full FTP directory (built via {@link FtpConfig#buildDirectory})
+     * @param originalName  original filename, used to generate a unique stored name
+     * @param config        FTP credentials from m07SystemParameters
+     */
+    public Uni<String> uploadFile(byte[] fileData, String directoryPath, String originalName, FtpConfig config) {
+        return vertx.executeBlocking(Uni.createFrom().item(() -> {
+            FTPClient ftp = new FTPClient();
             try {
-                connect(ftpClient);
-                String directoryPath = buildDirectoryPath(moduleType, referenceCode);
-                createDirectories(ftpClient, directoryPath);
-                String uniqueFileName = generateUniqueFileName(originalName);
-                String remotePath = directoryPath + "/" + uniqueFileName;
+                connect(ftp, config);
+                createDirectories(ftp, directoryPath);
+                String uniqueName = generateUniqueName(originalName);
+                String remotePath = directoryPath + "/" + uniqueName;
 
-                try (InputStream inputStream = new ByteArrayInputStream(fileData)) {
-                    boolean success = ftpClient.storeFile(remotePath, inputStream);
-                    if (!success) {
-                        throw new RuntimeException("Failed to upload file. FTP reply: " + ftpClient.getReplyString());
+                try (InputStream is = new ByteArrayInputStream(fileData)) {
+                    if (!ftp.storeFile(remotePath, is)) {
+                        throw new RuntimeException("FTP storeFile failed: " + ftp.getReplyString());
                     }
                 }
-                System.out.println("File uploaded successfully to: " + remotePath);
+                LOG.info("[FTP] Upload successful");
                 return remotePath;
             } catch (Exception e) {
-                System.err.println("FTP upload error: " + e.getMessage());
-                e.printStackTrace();
-                throw new RuntimeException("Failed to upload file to FTP server: " + e.getMessage(), e);
+                LOG.errorf("[FTP] Upload error: %s", e.getMessage());
+                throw new RuntimeException("FTP upload failed: " + e.getMessage(), e);
             } finally {
-                disconnect(ftpClient);
+                disconnect(ftp);
             }
-        });
+        }));
     }
 
-    public Uni<byte[]> downloadFile(String remotePath) {
-        return Uni.createFrom().item(() -> {
-            FTPClient ftpClient = new FTPClient();
+    /**
+     * Download file bytes from FTP.
+     *
+     * @param remotePath full FTP path (stored in m10Attachments.FilePath)
+     * @param config     FTP credentials from m07SystemParameters
+     */
+    public Uni<byte[]> downloadFile(String remotePath, FtpConfig config) {
+        return vertx.executeBlocking(Uni.createFrom().item(() -> {
+            FTPClient ftp = new FTPClient();
             try {
-                connect(ftpClient);
-                try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
-                    boolean success = ftpClient.retrieveFile(remotePath, outputStream);
-                    if (!success) {
-                        throw new RuntimeException("Failed to download file. FTP reply: " + ftpClient.getReplyString());
+                connect(ftp, config);
+                try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+                    if (!ftp.retrieveFile(remotePath, out)) {
+                        throw new RuntimeException("FTP retrieveFile failed: " + ftp.getReplyString());
                     }
-                    return outputStream.toByteArray();
+                    return out.toByteArray();
                 }
             } catch (Exception e) {
-                System.err.println("FTP download error: " + e.getMessage());
-                e.printStackTrace();
-                throw new RuntimeException("Failed to download file from FTP server: " + e.getMessage(), e);
+                LOG.errorf("[FTP] Download error: %s", e.getMessage());
+                throw new RuntimeException("FTP download failed: " + e.getMessage(), e);
             } finally {
-                disconnect(ftpClient);
+                disconnect(ftp);
             }
-        });
+        }));
     }
 
-    public Uni<Boolean> deleteFile(String remotePath) {
-        return Uni.createFrom().item(() -> {
-            FTPClient ftpClient = new FTPClient();
+    /**
+     * Delete a file from FTP. Non-existent file is treated as success.
+     *
+     * @param remotePath full FTP path (stored in m10Attachments.FilePath)
+     * @param config     FTP credentials from m07SystemParameters
+     */
+    public Uni<Boolean> deleteFile(String remotePath, FtpConfig config) {
+        return vertx.executeBlocking(Uni.createFrom().item(() -> {
+            FTPClient ftp = new FTPClient();
             try {
-                connect(ftpClient);
-                boolean deleted = ftpClient.deleteFile(remotePath);
-                if (deleted) {
-                    System.out.println("File deleted successfully: " + remotePath);
-                } else {
-                    System.out.println("File not found or already deleted: " + remotePath);
-                }
+                connect(ftp, config);
+                boolean deleted = ftp.deleteFile(remotePath);
+                LOG.infof("[FTP] Delete %s", deleted ? "successful" : "skipped (file not found)");
                 return true;
             } catch (Exception e) {
-                System.err.println("FTP delete error: " + e.getMessage());
-                e.printStackTrace();
-                throw new RuntimeException("Failed to delete file from FTP server: " + e.getMessage(), e);
+                LOG.errorf("[FTP] Delete error: %s", e.getMessage());
+                throw new RuntimeException("FTP delete failed: " + e.getMessage(), e);
             } finally {
-                disconnect(ftpClient);
+                disconnect(ftp);
             }
-        });
+        }));
     }
 
-    public Uni<Boolean> fileExists(String remotePath) {
-        return Uni.createFrom().item(() -> {
-            FTPClient ftpClient = new FTPClient();
-            try {
-                connect(ftpClient);
-                try (InputStream is = ftpClient.retrieveFileStream(remotePath)) {
-                    boolean exists = is != null && ftpClient.getReplyCode() != 550;
-                    ftpClient.completePendingCommand();
-                    return exists;
-                }
-            } catch (Exception e) {
-                return false;
-            } finally {
-                disconnect(ftpClient);
-            }
-        });
-    }
+    // ── Private helpers ───────────────────────────────────────────────────────
 
-    private void connect(FTPClient ftpClient) throws IOException {
-        ftpClient.setConnectTimeout(CONNECT_TIMEOUT_MS);
-        ftpClient.setDataTimeout(DATA_TIMEOUT);
-        ftpClient.setDefaultTimeout(CONNECT_TIMEOUT_MS);
-
-        ftpClient.connect(host, port);
-        int replyCode = ftpClient.getReplyCode();
-        if (!FTPReply.isPositiveCompletion(replyCode)) {
-            ftpClient.disconnect();
-            throw new RuntimeException("FTP server refused connection. Reply code: " + replyCode);
+    private void connect(FTPClient ftp, FtpConfig config) throws IOException {
+        ftp.setConnectTimeout(CONNECT_TIMEOUT_MS);
+        ftp.setDataTimeout(DATA_TIMEOUT);
+        ftp.setDefaultTimeout(CONNECT_TIMEOUT_MS);
+        ftp.connect(config.host(), config.port());
+        if (!FTPReply.isPositiveCompletion(ftp.getReplyCode())) {
+            ftp.disconnect();
+            throw new RuntimeException("FTP refused connection. Reply: " + ftp.getReplyCode());
         }
-
-        boolean loggedIn = ftpClient.login(username, password);
-        if (!loggedIn) {
-            ftpClient.disconnect();
-            throw new RuntimeException("Failed to login to FTP server. Check username/password.");
+        if (!ftp.login(config.username(), config.password())) {
+            ftp.disconnect();
+            throw new RuntimeException("FTP login failed — check FTP credentials in m07SystemParameters");
         }
-
-        ftpClient.setFileType(FTP.BINARY_FILE_TYPE);
-        ftpClient.enterLocalPassiveMode();
-
-        System.out.println("Connected to FTP server: " + host);
+        ftp.setFileType(FTP.BINARY_FILE_TYPE);
+        ftp.enterLocalPassiveMode();
+        LOG.info("[FTP] Connected");
     }
 
-    private String buildDirectoryPath(String moduleType, String referenceCode) {
-        return basePath + "/" + moduleType.toUpperCase() + "/" + referenceCode;
-    }
-
-    private String generateUniqueFileName(String originalName) {
-        String uuid = UUID.randomUUID().toString().substring(0, 8);
-        int lastDot = originalName.lastIndexOf('.');
-        if (lastDot > 0) {
-            String name = originalName.substring(0, lastDot);
-            String ext = originalName.substring(lastDot);
-            name = sanitizeFileName(name);
-            return uuid + "-" + name + ext;
-        }
-        return uuid + "-" + sanitizeFileName(originalName);
-    }
-
-    private String sanitizeFileName(String fileName) {
-        return fileName.replaceAll("[^a-zA-Z0-9.-]", "_");
-    }
-
-    private void createDirectories(FTPClient ftpClient, String directoryPath) throws IOException {
-        String[] folders = directoryPath.split("/");
-        StringBuilder currentPath = new StringBuilder();
-
-        for (String folder : folders) {
-            if (folder.isEmpty()) continue;
-            currentPath.append("/").append(folder);
-            String path = currentPath.toString();
-            boolean exists = ftpClient.changeWorkingDirectory(path);
-            if (!exists) {
-                boolean created = ftpClient.makeDirectory(path);
-                if (created) {
-                    System.out.println("Created directory: " + path);
-                }
-                ftpClient.changeWorkingDirectory(path);
-            }
-        }
-        ftpClient.changeWorkingDirectory("/");
-    }
-
-    private void disconnect(FTPClient ftpClient) {
+    private void disconnect(FTPClient ftp) {
         try {
-            if (ftpClient.isConnected()) {
-                ftpClient.logout();
-                ftpClient.disconnect();
+            if (ftp.isConnected()) {
+                ftp.logout();
+                ftp.disconnect();
+                LOG.info("[FTP] Disconnected");
             }
-        } catch (IOException e) {
-            System.err.println("Error disconnecting from FTP: " + e.getMessage());
+        } catch (IOException ignored) {}
+    }
+
+    private void createDirectories(FTPClient ftp, String path) throws IOException {
+        StringBuilder current = new StringBuilder();
+        for (String segment : path.split("/")) {
+            if (segment.isEmpty()) continue;
+            current.append("/").append(segment);
+            if (!ftp.changeWorkingDirectory(current.toString())) {
+                ftp.makeDirectory(current.toString());
+                ftp.changeWorkingDirectory(current.toString());
+            }
         }
+        ftp.changeWorkingDirectory("/");
+    }
+
+    private String generateUniqueName(String originalName) {
+        String uuid = UUID.randomUUID().toString().substring(0, 8);
+        int dot = originalName.lastIndexOf('.');
+        if (dot > 0) {
+            return uuid + "-" + sanitize(originalName.substring(0, dot)) + originalName.substring(dot);
+        }
+        return uuid + "-" + sanitize(originalName);
+    }
+
+    private String sanitize(String s) {
+        return s.replaceAll("[^a-zA-Z0-9._-]", "_");
     }
 }

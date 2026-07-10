@@ -24,18 +24,18 @@ import java.util.List;
  *   1. Validate + truncate fields to fit m18StaffClaimsDet VARCHAR(25) constraints
  *   2. Persist claim record → obtain generated UniqId
  *   3. If a photo was provided, upload it via AttachmentService with
- *      moduleType="STAFFCLAIMDET" and referenceCode={claim.UniqId}.
+ *      moduleType="CLAIM" and referenceCode={claim.UniqId}.
  *      AttachmentService internally uses FTPStorageService for the actual
  *      FTP transfer and records metadata in m10Attachments.
  *
  * Retrieval flow:
- *   Photos are retrieved via GET /api/v1/attachments?moduleType=STAFFCLAIMDET
+ *   Photos are retrieved via GET /api/v1/attachments?moduleType=CLAIM
  *   &referenceCode={claimId}, or via the convenience /staff-claims-det/{id}/photo.
  */
 @ApplicationScoped
 public class StaffClaimDetailService {
 
-    public static final String MODULE_TYPE = "STAFFCLAIMDET";
+    public static final String MODULE_TYPE = "CLAIM";
 
     // m18StaffClaimsDet column lengths — truncate inputs to match DDL
     private static final int LEN_STAFF_ID = 25;

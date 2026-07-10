@@ -2,6 +2,7 @@ package com.aisolutions.hrmanagement.repository;
 
 import com.aisolutions.hrmanagement.dto.AttachmentDTO;
 import com.aisolutions.hrmanagement.entity.Attachment;
+import com.aisolutions.hrmanagement.service.SystemParameterService;
 import com.aisolutions.hrmanagement.service.attachment.FTPStorageService;
 
 import io.quarkus.hibernate.reactive.panache.PanacheRepositoryBase;
@@ -20,6 +21,9 @@ public class AttachmentRepository implements PanacheRepositoryBase<Attachment, L
 
     @Inject
     FTPStorageService ftpStorageService;
+
+    @Inject
+    SystemParameterService systemParameterService;
 
     public Uni<List<AttachmentDTO>> findByModuleAndReference(String moduleType, String referenceCode) {
         return getSession().flatMap(session ->
@@ -65,7 +69,9 @@ public class AttachmentRepository implements PanacheRepositoryBase<Attachment, L
             byte[] fileData,
             String currentUser) {
 
-        return ftpStorageService.uploadFile(fileData, moduleType, referenceCode, originalName)
+        return systemParameterService.loadFtpConfig()
+            .flatMap(config -> ftpStorageService.uploadFile(
+                fileData, config.buildDirectory(moduleType, referenceCode), originalName, config))
             .flatMap(remotePath -> getSession().flatMap(session -> {
                 Attachment entity = new Attachment();
                 String extension = getFileExtension(originalName);
@@ -107,7 +113,8 @@ public class AttachmentRepository implements PanacheRepositoryBase<Attachment, L
                         return Uni.createFrom().failure(
                             new RuntimeException("File path not found for attachment: " + uniqId));
                     }
-                    return ftpStorageService.downloadFile(filePath);
+                    return systemParameterService.loadFtpConfig()
+                        .flatMap(config -> ftpStorageService.downloadFile(filePath, config));
                 } else if ("LOCAL".equalsIgnoreCase(storageType)) {
                     byte[] fileData = attachment.getFileData();
                     if (fileData == null) {
@@ -133,7 +140,8 @@ public class AttachmentRepository implements PanacheRepositoryBase<Attachment, L
 
                 Uni<Boolean> deleteFromStorage;
                 if ("FTP".equalsIgnoreCase(storageType) && filePath != null && !filePath.isBlank()) {
-                    deleteFromStorage = ftpStorageService.deleteFile(filePath);
+                    deleteFromStorage = systemParameterService.loadFtpConfig()
+                        .flatMap(config -> ftpStorageService.deleteFile(filePath, config));
                 } else {
                     deleteFromStorage = Uni.createFrom().item(true);
                 }
