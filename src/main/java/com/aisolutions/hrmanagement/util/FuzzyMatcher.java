@@ -25,7 +25,7 @@ public final class FuzzyMatcher {
         List<String> bigramsB = bigrams(b);
 
         Map<String, Integer> countsB = new HashMap<>();
-        for (String bg : bigramsB) countsB.merge(bg, 1, Integer::sum);
+        for (String bg : bigramsB) countsB.merge(bg, 1, (oldValue, value) -> oldValue + value);
 
         int intersection = 0;
         for (String bg : bigramsA) {

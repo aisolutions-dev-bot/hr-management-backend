@@ -63,8 +63,8 @@ public class OcrGlobalFieldRuleRepository implements PanacheRepositoryBase<OcrGl
 
     public Uni<Long> deleteAll() {
         return getSession().flatMap(session ->
-            session.createQuery("DELETE FROM OcrGlobalFieldRule").executeUpdate()
-        ).map(Integer::longValue);
+            session.createMutationQuery("DELETE FROM OcrGlobalFieldRule").executeUpdate()
+        ).map(count -> count == null ? 0L : count.longValue());
     }
 
     public Uni<Long> countAll() {

@@ -34,7 +34,7 @@ public class SystemParameterRepository implements PanacheRepositoryBase<SystemPa
                 .getResultList()
         ).map(list ->
             list.stream().collect(Collectors.toMap(
-                SystemParameter::getParameter,
+                p -> p.getParameter(),
                 p -> p.getParameterValue() != null ? p.getParameterValue() : ""
             ))
         );

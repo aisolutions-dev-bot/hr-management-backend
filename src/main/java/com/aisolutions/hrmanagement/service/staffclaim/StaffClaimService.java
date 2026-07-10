@@ -1,5 +1,6 @@
 package com.aisolutions.hrmanagement.service.staffclaim;
 
+import com.aisolutions.hrmanagement.dto.AttachmentDTO;
 import com.aisolutions.hrmanagement.dto.StaffClaimDTO;
 import com.aisolutions.hrmanagement.dto.StaffClaimDetailDTO;
 import com.aisolutions.hrmanagement.entity.StaffClaim;
@@ -7,6 +8,7 @@ import com.aisolutions.hrmanagement.entity.StaffClaimDetail;
 import com.aisolutions.hrmanagement.repository.StaffClaimDetailRepository;
 import com.aisolutions.hrmanagement.repository.StaffClaimRepository;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
+import com.aisolutions.hrmanagement.service.attachment.AttachmentService;
 import com.aisolutions.hrmanagement.util.StringNormalizer;
 
 import io.quarkus.hibernate.reactive.panache.Panache;
@@ -47,6 +49,7 @@ public class StaffClaimService {
     @Inject StaffClaimDetailRepository detailRepo;
     @Inject StaffClaimDetailService detailService;
     @Inject CurrentUserService currentUserService;
+    @Inject AttachmentService attachmentService;
 
     // ─────────────────────────────────────────────────────────
     //  CREATE DRAFT
@@ -88,7 +91,7 @@ public class StaffClaimService {
             if (headers.isEmpty()) {
                 return Uni.createFrom().item(List.<StaffClaimDTO>of());
             }
-            List<Long> ids = headers.stream().map(StaffClaim::getUniqId).toList();
+            List<Long> ids = headers.stream().map(h -> h.getUniqId()).toList();
             return detailRepo.countByHeaderIds(ids).map(rows -> {
                 java.util.Map<Long, Integer> counts = new java.util.HashMap<>();
                 for (Object[] r : rows) {
@@ -132,7 +135,10 @@ public class StaffClaimService {
 
     public Uni<Void> removeLine(Long headerId, Long lineId) {
         return requireDraft(headerId).flatMap(h ->
-            Panache.withTransaction(() -> detailRepo.deleteById(lineId))
+            // Remove the line's receipt attachment(s) first (FTP file + m10Attachments row),
+            // so deleting a draft receipt never leaves an orphaned file/record behind.
+            deleteLineAttachments(lineId)
+                .flatMap(ignored -> Panache.withTransaction(() -> detailRepo.deleteById(lineId)))
                 .flatMap(deleted -> {
                     if (Boolean.FALSE.equals(deleted)) {
                         return Uni.createFrom().failure(
@@ -141,6 +147,27 @@ public class StaffClaimService {
                     return recalcTotal(headerId).replaceWithVoid();
                 })
         );
+    }
+
+    /**
+     * Deletes every receipt attachment linked to a claim line — both the FTP file and
+     * the m10Attachments row — via {@link AttachmentService#deleteAttachment}. No-op when
+     * the line has no receipt. Attachments are keyed by moduleType="CLAIM", referenceCode=lineId.
+     */
+    private Uni<Void> deleteLineAttachments(Long lineId) {
+        return attachmentService
+                .getAttachments(StaffClaimDetailService.MODULE_TYPE, String.valueOf(lineId))
+                .flatMap(atts -> {
+                    Uni<Void> chain = Uni.createFrom().voidItem();
+                    if (atts == null || atts.isEmpty()) {
+                        return chain;
+                    }
+                    for (AttachmentDTO att : atts) {
+                        chain = chain.flatMap(v ->
+                                attachmentService.deleteAttachment(att.getUniqId()).replaceWithVoid());
+                    }
+                    return chain;
+                });
     }
 
     // ─────────────────────────────────────────────────────────
@@ -209,7 +236,7 @@ public class StaffClaimService {
     private BigDecimal sumClaimAmount(List<StaffClaimDetail> lines) {
         return lines.stream()
                 .map(l -> l.getClaimAmount() == null ? BigDecimal.ZERO : l.getClaimAmount())
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
+                .reduce(BigDecimal.ZERO, (sum, value) -> sum.add(value));
     }
 
     private StaffClaimDTO toHeaderDto(StaffClaim h, List<StaffClaimDetailDTO> lines) {

@@ -51,8 +51,8 @@ public class OcrMerchantRuleRepository implements PanacheRepositoryBase<OcrMerch
 
     public Uni<Long> deleteAll() {
         return getSession().flatMap(session ->
-            session.createQuery("DELETE FROM OcrMerchantRule").executeUpdate()
-        ).map(Integer::longValue);
+            session.createMutationQuery("DELETE FROM OcrMerchantRule").executeUpdate()
+        ).map(count -> count == null ? 0L : count.longValue());
     }
 
     public Uni<Long> countAll() {

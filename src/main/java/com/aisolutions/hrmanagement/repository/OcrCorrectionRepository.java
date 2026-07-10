@@ -92,8 +92,8 @@ public class OcrCorrectionRepository implements PanacheRepositoryBase<OcrCorrect
 
     public Uni<Long> deleteAll() {
         return getSession().flatMap(session ->
-            session.createQuery("DELETE FROM OcrCorrection").executeUpdate()
-        ).map(Integer::longValue);
+            session.createMutationQuery("DELETE FROM OcrCorrection").executeUpdate()
+        ).map(count -> count == null ? 0L : count.longValue());
     }
 
     private static long toLong(Object o) {
