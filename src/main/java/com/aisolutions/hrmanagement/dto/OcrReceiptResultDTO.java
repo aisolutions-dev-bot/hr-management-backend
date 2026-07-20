@@ -27,6 +27,13 @@ public class OcrReceiptResultDTO {
     /** Total amount paid */
     private BigDecimal receiptAmount;
 
+    /**
+     * Currency the receipt is in, as an ISO code (e.g. MYR, SGD, USD), or null when
+     * the receipt shows no currency or the AI can't tell (e.g. a bare "$"). The
+     * frontend defaults a null to the base currency, editable by the user.
+     */
+    private String currency;
+
     /** Raw text extracted by OCR (for debugging / audit) */
     private String rawText;
 

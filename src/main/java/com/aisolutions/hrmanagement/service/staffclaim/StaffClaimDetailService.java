@@ -3,6 +3,7 @@ package com.aisolutions.hrmanagement.service.staffclaim;
 import com.aisolutions.hrmanagement.dto.StaffClaimDetailDTO;
 import com.aisolutions.hrmanagement.entity.StaffClaimDetail;
 import com.aisolutions.hrmanagement.repository.StaffClaimDetailRepository;
+import com.aisolutions.hrmanagement.service.CurrencyService;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
 import com.aisolutions.hrmanagement.service.attachment.AttachmentService;
 import com.aisolutions.hrmanagement.util.StringNormalizer;
@@ -12,6 +13,7 @@ import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.time.ZoneId;
@@ -44,10 +46,12 @@ public class StaffClaimDetailService {
     private static final int LEN_DESCRIPTION = 100;
     private static final int LEN_MERCHANT_NAME = 25;
     private static final int LEN_RECEIPT_NUMBER = 25;
+    private static final int LEN_CURRENCY = 10;
 
     @Inject StaffClaimDetailRepository claimRepo;
     @Inject AttachmentService attachmentService;
     @Inject CurrentUserService currentUserService;
+    @Inject CurrencyService currencyService;
 
     // ─────────────────────────────────────────────────────────
     //  CREATE
@@ -61,35 +65,46 @@ public class StaffClaimDetailService {
 
         validate(dto);
 
+        // The user enters the Original Amount in the receipt's currency; it maps to
+        // ReceiptAmount. (An older client that sends only claimAmount is treated as
+        // entering the amount already in base — currency falls through to base below.)
+        BigDecimal originalAmount = dto.getReceiptAmount() != null
+                ? dto.getReceiptAmount() : dto.getClaimAmount();
+
         return currentUserService.getCurrentUser()
             .onItem().transformToUni(user -> {
                 String staffId = (user != null && user.getStaffId() != null)
                         ? user.getStaffId()
                         : dto.getStaffId();
 
-                // 1. Persist the claim (in transaction)
-                return Panache.withTransaction(() ->
-                    claimRepo.save(buildEntity(dto, staffId))
-                )
-                // 2. Upload photo to FTP (separate call — AttachmentService runs its own transaction)
-                .flatMap(saved -> {
-                    if (photoData == null || photoData.length == 0) {
-                        return Uni.createFrom().item(toDto(saved, null, null));
-                    }
-                    return attachmentService.uploadFile(
-                            MODULE_TYPE,
-                            String.valueOf(saved.getUniqId()),
-                            photoFileName != null ? photoFileName : "receipt.jpg",
-                            photoContentType != null ? photoContentType : "image/jpeg",
-                            photoData
-                        )
-                        .map(att -> toDto(saved, att.getUniqId(), att.getFilePath()))
-                        .onFailure().recoverWithItem(err -> {
-                            System.err.println("[StaffClaimDetail] FTP upload failed for claim "
-                                    + saved.getUniqId() + ": " + err.getMessage());
-                            return toDto(saved, null, null);
-                        });
-                });
+                // 0. Convert the original amount to base server-side (multiply-to-base),
+                //    resolving the currency + rate from m01Currency — never trusting a
+                //    client-sent rate. A currency with no rate fails the save here.
+                return currencyService.toBase(originalAmount, dto.getCurrency()).flatMap(conv ->
+                    // 1. Persist the claim (in transaction)
+                    Panache.withTransaction(() ->
+                        claimRepo.save(buildEntity(dto, staffId, originalAmount, conv))
+                    )
+                    // 2. Upload photo to FTP (separate call — AttachmentService runs its own transaction)
+                    .flatMap(saved -> {
+                        if (photoData == null || photoData.length == 0) {
+                            return Uni.createFrom().item(toDto(saved, null, null));
+                        }
+                        return attachmentService.uploadFile(
+                                MODULE_TYPE,
+                                String.valueOf(saved.getUniqId()),
+                                photoFileName != null ? photoFileName : "receipt.jpg",
+                                photoContentType != null ? photoContentType : "image/jpeg",
+                                photoData
+                            )
+                            .map(att -> toDto(saved, att.getUniqId(), att.getFilePath()))
+                            .onFailure().recoverWithItem(err -> {
+                                System.err.println("[StaffClaimDetail] FTP upload failed for claim "
+                                        + saved.getUniqId() + ": " + err.getMessage());
+                                return toDto(saved, null, null);
+                            });
+                    })
+                );
             });
     }
 
@@ -129,11 +144,14 @@ public class StaffClaimDetailService {
             throw new IllegalArgumentException("Claim Type is required");
         if (dto.getClaimDate() == null)
             throw new IllegalArgumentException("Claim Date is required");
-        if (dto.getClaimAmount() == null || dto.getClaimAmount().signum() <= 0)
-            throw new IllegalArgumentException("Claim Amount must be greater than zero");
+        BigDecimal original = dto.getReceiptAmount() != null
+                ? dto.getReceiptAmount() : dto.getClaimAmount();
+        if (original == null || original.signum() <= 0)
+            throw new IllegalArgumentException("Amount must be greater than zero");
     }
 
-    private StaffClaimDetail buildEntity(StaffClaimDetailDTO dto, String staffIdOverride) {
+    private StaffClaimDetail buildEntity(StaffClaimDetailDTO dto, String staffIdOverride,
+                                         BigDecimal originalAmount, CurrencyService.Converted conv) {
         StaffClaimDetail e = new StaffClaimDetail();
         LocalDateTime now = LocalDateTime.now();
 
@@ -147,10 +165,16 @@ public class StaffClaimDetailService {
         e.setMerchantName(StringNormalizer.truncate(dto.getMerchantName(), LEN_MERCHANT_NAME));
         e.setReceiptNumber(StringNormalizer.truncate(dto.getReceiptNumber(), LEN_RECEIPT_NUMBER));
         e.setReceiptDate(dto.getReceiptDate());
-        e.setReceiptAmount(dto.getReceiptAmount());
-        e.setClaimAmount(dto.getClaimAmount());
-        e.setCurrency(dto.getCurrency());
-        e.setExchangeRate(dto.getExchangeRate());
+
+        // ReceiptAmount = the "Original Amount" the user entered, in the receipt currency.
+        // ClaimAmount   = that amount converted to base, which is what the header total and
+        //                 the approver see. Currency + ExchangeRate record how it was
+        //                 converted, so the value is reproducible and frozen against later
+        //                 rate changes — all four computed server-side by CurrencyService.
+        e.setReceiptAmount(originalAmount);
+        e.setClaimAmount(conv.baseAmount());
+        e.setCurrency(StringNormalizer.truncate(conv.currencyCode(), LEN_CURRENCY));
+        e.setExchangeRate(conv.rateUsed());
 
         // Link to the claim header + initial itemised-approval status
         e.setClaimId(dto.getClaimId());

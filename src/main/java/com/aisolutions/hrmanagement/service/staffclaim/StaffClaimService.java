@@ -18,8 +18,12 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.NotFoundException;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Orchestrates the claim HEADER ({@link StaffClaim}) and its line items
@@ -45,6 +49,15 @@ public class StaffClaimService {
     private static final int LEN_STAFF_ID = 25;
     private static final int LEN_PERIOD   = 50;
 
+    /**
+     * Claim periods read as JULY-2026. Locale is pinned to ENGLISH so the period a
+     * header is filed under never depends on the server's locale — a period generated
+     * as JUILLET-2026 would silently fail to match the same month's existing header
+     * and auto-create a duplicate.
+     */
+    private static final DateTimeFormatter PERIOD_FORMAT =
+            DateTimeFormatter.ofPattern("MMMM-yyyy", Locale.ENGLISH);
+
     @Inject StaffClaimRepository headerRepo;
     @Inject StaffClaimDetailRepository detailRepo;
     @Inject StaffClaimDetailService detailService;
@@ -56,29 +69,72 @@ public class StaffClaimService {
     // ─────────────────────────────────────────────────────────
 
     public Uni<StaffClaimDTO> createDraft(StaffClaimDTO dto) {
+        return resolveStaffId(dto.getStaffId()).flatMap(staffId ->
+                createDraftFor(staffId, dto.getClaimPeriod())
+                        .map(saved -> toHeaderDto(saved, null)));
+    }
+
+    /**
+     * The claim period the current date falls in, e.g. JULY-2026.
+     * A claim is filed under the month it is entered in, not the month of the
+     * receipt — a June receipt handed in late lands on the July claim.
+     */
+    public static String currentPeriod() {
+        return LocalDate.now().format(PERIOD_FORMAT).toUpperCase(Locale.ENGLISH);
+    }
+
+    /**
+     * The staff member's open (DRAFT) claim for the current period, creating one if
+     * they have none. This is what "Add Receipt" lands on, so a staff member never
+     * has to create a claim before entering a receipt.
+     *
+     * Only DRAFT counts as open — it is the sole status a line can still be added to
+     * ({@link #requireDraft}). A period whose claim is already SUBMITTED gets a fresh
+     * DRAFT header alongside it, which is the intended behaviour: a late receipt for a
+     * submitted month still needs somewhere to go.
+     *
+     * Not atomic — two Add Receipt taps racing each other could each find no draft and
+     * create one. The window is small and the damage is a spare empty header rather
+     * than lost data; closing it properly needs a unique index on
+     * (StaffId, ClaimPeriod, Status), which is a migration.
+     */
+    public Uni<StaffClaimDTO> getOrCreateCurrentDraft(String requestedStaffId) {
+        String period = currentPeriod();
+        return resolveStaffId(requestedStaffId).flatMap(staffId ->
+            headerRepo.findByStaffPeriodStatus(staffId, period, STATUS_DRAFT)
+                .flatMap(existing -> existing != null
+                        ? Uni.createFrom().item(existing)
+                        : createDraftFor(staffId, period))
+                .flatMap(h -> getWithLines(h.getUniqId()))
+        );
+    }
+
+    /** Resolves the claimant: the logged-in user wins, falling back to the requested id. */
+    private Uni<String> resolveStaffId(String requestedStaffId) {
         return currentUserService.getCurrentUser().flatMap(user -> {
             String staffId = (user != null && user.getStaffId() != null)
                     ? user.getStaffId()
-                    : dto.getStaffId();
+                    : requestedStaffId;
             if (StringNormalizer.isBlank(staffId)) {
                 return Uni.createFrom().failure(
                         new IllegalArgumentException("Cannot resolve the claimant (staffId)"));
             }
-
-            LocalDateTime now = LocalDateTime.now();
-            StaffClaim h = new StaffClaim();
-            h.setStaffId(StringNormalizer.truncate(staffId, LEN_STAFF_ID));
-            h.setClaimPeriod(StringNormalizer.truncate(dto.getClaimPeriod(), LEN_PERIOD));
-            h.setClaimAmount(BigDecimal.ZERO);
-            h.setStatus(STATUS_DRAFT);
-            h.setEntryStaff(h.getStaffId());
-            h.setEntryDate(now);
-            h.setLastEditStaff(h.getStaffId());
-            h.setLastEditDate(now);
-
-            return Panache.withTransaction(() -> headerRepo.save(h))
-                    .map(saved -> toHeaderDto(saved, null));
+            return Uni.createFrom().item(staffId);
         });
+    }
+
+    private Uni<StaffClaim> createDraftFor(String staffId, String period) {
+        LocalDateTime now = LocalDateTime.now();
+        StaffClaim h = new StaffClaim();
+        h.setStaffId(StringNormalizer.truncate(staffId, LEN_STAFF_ID));
+        h.setClaimPeriod(StringNormalizer.truncate(period, LEN_PERIOD));
+        h.setClaimAmount(BigDecimal.ZERO);
+        h.setStatus(STATUS_DRAFT);
+        h.setEntryStaff(h.getStaffId());
+        h.setEntryDate(now);
+        h.setLastEditStaff(h.getStaffId());
+        h.setLastEditDate(now);
+        return Panache.withTransaction(() -> headerRepo.save(h));
     }
 
     // ─────────────────────────────────────────────────────────
@@ -192,13 +248,69 @@ public class StaffClaimService {
                     return Uni.createFrom().failure(new IllegalArgumentException(
                             "Only a DRAFT claim can be submitted (current status: " + h.getStatus() + ")"));
                 }
-                h.setClaimAmount(total);
-                h.setStatus(STATUS_SUBMITTED);
-                h.setSubmittedDate(now);
-                h.setLastEditDate(now);
-                return headerRepo.update(h);
+                // Number the period at submit (JULY-2026 → JULY-2026-001) so multiple
+                // claims in one month are distinguishable. Drafts keep the plain month so
+                // the get-or-create lookup still matches.
+                String basePeriod = h.getClaimPeriod();
+                Uni<String> numberedPeriod = StringNormalizer.isBlank(basePeriod)
+                        ? Uni.createFrom().item(basePeriod)
+                        : headerRepo.findPeriodsWithSuffix(h.getStaffId(), basePeriod)
+                                .map(existing -> nextNumberedPeriod(basePeriod, existing));
+                return numberedPeriod.flatMap(period -> {
+                    h.setClaimPeriod(period);
+                    h.setClaimAmount(total);
+                    h.setStatus(STATUS_SUBMITTED);
+                    h.setSubmittedDate(now);
+                    h.setLastEditDate(now);
+                    return headerRepo.update(h);
+                });
             })).map(saved -> toHeaderDto(saved, null));
         });
+    }
+
+    /**
+     * Submits several drafts in one action (the Submit Claims tick-list).
+     *
+     * Every claim is checked before any is written, so the common mistakes — an empty
+     * draft, or one already submitted in another tab — are rejected with nothing
+     * submitted. The submits themselves are separate transactions: a failure after
+     * that point (a dropped connection mid-run) can still leave earlier claims in the
+     * batch submitted, which is recoverable and visible, since each claim's status is
+     * shown in the list the user returns to.
+     */
+    public Uni<List<StaffClaimDTO>> submitBatch(List<Long> headerIds) {
+        if (headerIds == null || headerIds.isEmpty()) {
+            return Uni.createFrom().failure(
+                    new IllegalArgumentException("Select at least one claim to submit"));
+        }
+        List<Long> ids = headerIds.stream().distinct().toList();
+
+        Uni<Void> validated = Uni.createFrom().voidItem();
+        for (Long id : ids) {
+            validated = validated.flatMap(v -> requireSubmittable(id));
+        }
+
+        Uni<List<StaffClaimDTO>> chain = validated.replaceWith(new ArrayList<>());
+        for (Long id : ids) {
+            chain = chain.flatMap(acc -> submit(id).map(dto -> {
+                acc.add(dto);
+                return acc;
+            }));
+        }
+        return chain.map(list -> (List<StaffClaimDTO>) list);
+    }
+
+    /** Fails unless the claim exists, is still a DRAFT, and has at least one line. */
+    private Uni<Void> requireSubmittable(Long headerId) {
+        return requireDraft(headerId).flatMap(h ->
+            detailRepo.findByHeaderId(headerId).flatMap(lines -> {
+                if (lines.isEmpty()) {
+                    return Uni.createFrom().failure(new IllegalArgumentException(
+                            "Claim " + h.getClaimPeriod() + " has no receipts and cannot be submitted"));
+                }
+                return Uni.createFrom().voidItem();
+            })
+        );
     }
 
     // ─────────────────────────────────────────────────────────
@@ -231,6 +343,21 @@ public class StaffClaimService {
                 return headerRepo.update(h);
             }));
         });
+    }
+
+    /** Next numbered period under a base month, e.g. "JULY-2026" → "JULY-2026-002" given an
+     *  existing "JULY-2026-001"; zero-padded to three digits. */
+    private String nextNumberedPeriod(String basePeriod, List<String> existing) {
+        String prefix = basePeriod + "-";
+        int max = 0;
+        for (String p : existing) {
+            if (p == null || !p.startsWith(prefix)) continue;
+            try {
+                int n = Integer.parseInt(p.substring(prefix.length()).trim());
+                if (n > max) max = n;
+            } catch (NumberFormatException ignored) { /* not a numeric suffix */ }
+        }
+        return String.format("%s-%03d", basePeriod, max + 1);
     }
 
     private BigDecimal sumClaimAmount(List<StaffClaimDetail> lines) {

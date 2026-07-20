@@ -18,17 +18,20 @@ import org.jboss.resteasy.reactive.multipart.FileUpload;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.List;
 import java.util.Map;
 
 /**
  * Claim HEADER endpoints (batch model — one header + many line items).
  *
  *   POST   /api/v1/staff-claims                       — create a draft claim (JSON: claimPeriod)
+ *   POST   /api/v1/staff-claims/current-draft         — get-or-create this month's open draft
  *   GET    /api/v1/staff-claims?staffId=X             — list a staff member's claims (header level)
  *   GET    /api/v1/staff-claims/{id}                  — fetch one claim WITH its line items
  *   POST   /api/v1/staff-claims/{id}/lines            — add a line (+optional receipt photo, multipart)
  *   DELETE /api/v1/staff-claims/{id}/lines/{lineId}   — remove a line (draft only)
  *   POST   /api/v1/staff-claims/{id}/submit           — submit the claim for approval
+ *   POST   /api/v1/staff-claims/submit-batch          — submit several drafts at once
  */
 @Path("/api/v1/staff-claims")
 @Produces(MediaType.APPLICATION_JSON)
@@ -45,6 +48,17 @@ public class StaffClaimResource {
     public Uni<Response> createDraft(StaffClaimDTO dto) {
         return claimService.createDraft(dto == null ? new StaffClaimDTO() : dto)
                 .map(saved -> Response.status(Response.Status.CREATED).entity(saved).build())
+                .onFailure().recoverWithItem(StaffClaimResource::toError);
+    }
+
+    // ── GET-OR-CREATE THIS MONTH'S OPEN DRAFT ──
+    // POST, not GET: it creates a header when the staff member has none for the month.
+    @POST
+    @Path("/current-draft")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Uni<Response> currentDraft(StaffClaimDTO dto) {
+        return claimService.getOrCreateCurrentDraft(dto == null ? null : dto.getStaffId())
+                .map(claim -> Response.ok(claim).build())
                 .onFailure().recoverWithItem(StaffClaimResource::toError);
     }
 
@@ -118,6 +132,16 @@ public class StaffClaimResource {
     @Path("/{id}/submit")
     public Uni<Response> submit(@PathParam("id") Long headerId) {
         return claimService.submit(headerId)
+                .map(saved -> Response.ok(saved).build())
+                .onFailure().recoverWithItem(StaffClaimResource::toError);
+    }
+
+    // ── SUBMIT BATCH (body: [4, 5]) ──
+    @POST
+    @Path("/submit-batch")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Uni<Response> submitBatch(List<Long> claimIds) {
+        return claimService.submitBatch(claimIds)
                 .map(saved -> Response.ok(saved).build())
                 .onFailure().recoverWithItem(StaffClaimResource::toError);
     }

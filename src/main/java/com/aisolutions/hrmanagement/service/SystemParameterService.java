@@ -13,9 +13,9 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Reads attachment/FTP configuration from m07SystemParameters instead of
- * application.properties, so credentials can be changed in the DB without a
- * redeploy (the HR Railway deployment is read-only for env vars).
+ * Reads configuration from m07SystemParameters instead of application.properties,
+ * so values can be changed in the DB without a redeploy (the HR Railway deployment
+ * is read-only for env vars).
  *
  * Required parameters:
  *   ATTACHMENT-MODE     — must be "FTP" (case-insensitive)
@@ -23,6 +23,7 @@ import java.util.Map;
  *   FTP-HOST            — FTP server hostname
  *   FTP-USERNAME        — FTP login user
  *   FTP-PASSWORD        — FTP login password
+ *   CURRENCY-BASE       — the currency every claim amount is recorded in (e.g. SGD)
  * Optional:
  *   ATTACHMENT-PATH-HR  — module folder for HR files (defaults to "hr-attachments"
  *                          when absent; mirrors jobtasks-attachments convention)
@@ -31,6 +32,14 @@ import java.util.Map;
 public class SystemParameterService {
 
     private static final String DEFAULT_HR_FOLDER = "hr-attachments";
+
+    /**
+     * The authoritative base-currency parameter. A second, undocumented
+     * SYSTEM-BASE-CURRENCY row also exists in m07SystemParameters with the same
+     * value; CURRENCY-BASE is the one this system reads. Do not add a fallback to
+     * the other — two live sources will drift.
+     */
+    public static final String PARAM_BASE_CURRENCY = "CURRENCY-BASE";
 
     private static final List<String> FTP_PARAMS = List.of(
         "ATTACHMENT-MODE",
@@ -48,6 +57,9 @@ public class SystemParameterService {
 
     private volatile FtpConfig cachedFtpConfig;
     private volatile Instant   cacheExpiry = Instant.MIN;
+
+    private volatile String  cachedBaseCurrency;
+    private volatile Instant baseCurrencyExpiry = Instant.MIN;
 
     /**
      * Load FTP configuration from m07SystemParameters.
@@ -89,6 +101,33 @@ public class SystemParameterService {
     public void clearFtpConfigCache() {
         cachedFtpConfig = null;
         cacheExpiry     = Instant.MIN;
+    }
+
+    /**
+     * The currency every claim amount is recorded in, from CURRENCY-BASE.
+     * Cached for 5 minutes, like the FTP config.
+     *
+     * Claim amounts carry no currency of their own — the value is meaningless
+     * without knowing which currency it denominates, so a missing parameter is a
+     * configuration error rather than something to guess a default for.
+     */
+    public Uni<String> loadBaseCurrency() {
+        if (cachedBaseCurrency != null && Instant.now().isBefore(baseCurrencyExpiry)) {
+            return Uni.createFrom().item(cachedBaseCurrency);
+        }
+        return systemParameterRepository.getParameterMap(List.of(PARAM_BASE_CURRENCY))
+            .map(params -> {
+                String currency = require(params, PARAM_BASE_CURRENCY);
+                cachedBaseCurrency = currency;
+                baseCurrencyExpiry = Instant.now().plus(CACHE_TTL);
+                return currency;
+            });
+    }
+
+    /** Force the next {@link #loadBaseCurrency()} call to re-fetch from DB. */
+    public void clearBaseCurrencyCache() {
+        cachedBaseCurrency = null;
+        baseCurrencyExpiry = Instant.MIN;
     }
 
     private static String require(Map<String, String> params, String key) {

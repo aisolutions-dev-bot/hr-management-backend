@@ -44,13 +44,17 @@ public class ReceiptOcrService {
         "- receiptNumber: receipt, invoice, order, or transaction number\n" +
         "- receiptDate: date of the receipt in yyyy-MM-dd format\n" +
         "- receiptAmount: the final total amount paid (numeric, no currency symbol)\n" +
+        "- currency: the ISO code of the receipt's currency (e.g. MYR, SGD, USD). " +
+        "Use the symbol/code and any location or language cues. If it shows only a " +
+        "bare \"$\" or you cannot tell, use null — do not guess.\n" +
         "\n" +
         "Respond ONLY with this JSON structure (use null for fields not found):\n" +
         "{\n" +
         "  \"merchantName\": \"...\",\n" +
         "  \"receiptNumber\": \"...\",\n" +
         "  \"receiptDate\": \"...\",\n" +
-        "  \"receiptAmount\": 0.00\n" +
+        "  \"receiptAmount\": 0.00,\n" +
+        "  \"currency\": \"...\"\n" +
         "}";
 
     /**
@@ -140,6 +144,8 @@ public class ReceiptOcrService {
                     LOG.warn("[ReceiptOcr] Could not parse amount: " + amtRaw);
                 }
             }
+
+            result.setCurrency(getString(parsed, "currency"));
 
             result.setSuccess(true);
         } catch (Exception e) {
