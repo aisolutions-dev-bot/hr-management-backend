@@ -16,10 +16,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Extracts receipt data from an image using OpenAI GPT-4o Vision.
+ * Extracts receipt data from an image using OpenAI GPT-4o-mini Vision.
  *
  * Replaces the previous Tesseract.js browser-based OCR approach.
- * GPT-4o vision understands receipt layout semantically — no keyword rules
+ * The vision model understands receipt layout semantically — no keyword rules
  * or merchant training data required.
  */
 @ApplicationScoped
@@ -43,7 +43,12 @@ public class ReceiptOcrService {
         "- merchantName: the business/restaurant/store name\n" +
         "- receiptNumber: receipt, invoice, order, or transaction number\n" +
         "- receiptDate: date of the receipt in yyyy-MM-dd format\n" +
-        "- receiptAmount: the final total amount paid (numeric, no currency symbol)\n" +
+        "- receiptAmount: the final total paid, as a string, transcribed exactly as it is " +
+        "printed. Keep the digits and separators you see and do not reformat, round, or " +
+        "convert them. Both \".\" and \",\" are used as thousand separators depending on the " +
+        "country, so \"1.275.750\" is one million two hundred seventy-five thousand — not " +
+        "1275.75. Never add a decimal part that is not printed on the receipt; VND, IDR, " +
+        "JPY and KRW do not have one at all. Omit the currency symbol.\n" +
         "- currency: the ISO code of the receipt's currency (e.g. MYR, SGD, USD). " +
         "Use the symbol/code and any location or language cues. If it shows only a " +
         "bare \"$\" or you cannot tell, use null — do not guess.\n" +
@@ -53,7 +58,7 @@ public class ReceiptOcrService {
         "  \"merchantName\": \"...\",\n" +
         "  \"receiptNumber\": \"...\",\n" +
         "  \"receiptDate\": \"...\",\n" +
-        "  \"receiptAmount\": 0.00,\n" +
+        "  \"receiptAmount\": \"...\",\n" +
         "  \"currency\": \"...\"\n" +
         "}";
 
@@ -136,16 +141,19 @@ public class ReceiptOcrService {
             result.setReceiptNumber(getString(parsed, "receiptNumber"));
             result.setReceiptDate(getString(parsed, "receiptDate"));
 
+            String currency = getString(parsed, "currency");
+            result.setCurrency(currency);
+
             Object amtRaw = parsed.get("receiptAmount");
             if (amtRaw != null) {
-                try {
-                    result.setReceiptAmount(new java.math.BigDecimal(amtRaw.toString()));
-                } catch (Exception e) {
-                    LOG.warn("[ReceiptOcr] Could not parse amount: " + amtRaw);
+                var amount = ReceiptAmountParser.parse(amtRaw.toString(), currency);
+                result.setReceiptAmount(amount.amount());
+                result.setAmountWarning(amount.warning());
+                if (amount.warning() != null) {
+                    LOG.warnf("[ReceiptOcr] Amount \"%s\" (%s): %s",
+                            amtRaw, currency, amount.warning());
                 }
             }
-
-            result.setCurrency(getString(parsed, "currency"));
 
             result.setSuccess(true);
         } catch (Exception e) {

@@ -34,6 +34,13 @@ public class OcrReceiptResultDTO {
      */
     private String currency;
 
+    /**
+     * Set when the amount was read but cannot be trusted — a fractional total on a
+     * currency with no minor unit, or digits that could not be turned into a number.
+     * Null when the amount is sound. The frontend shows this alongside the value.
+     */
+    private String amountWarning;
+
     /** Raw text extracted by OCR (for debugging / audit) */
     private String rawText;
 

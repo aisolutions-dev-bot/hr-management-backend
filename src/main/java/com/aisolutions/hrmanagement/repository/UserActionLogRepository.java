@@ -7,7 +7,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 
 import com.aisolutions.hrmanagement.entity.UserActionLog;
 
-import java.time.LocalDateTime;
+import com.aisolutions.shared.util.DateUtil;
 
 @ApplicationScoped
 @WithSession
@@ -32,7 +32,7 @@ public class UserActionLogRepository implements PanacheRepositoryBase<UserAction
       log.setModule(module);
       log.setReferenceNo(referenceNo);
       log.setAction(action);
-      log.setLogDate(LocalDateTime.now());
+      log.setLogDate(DateUtil.nowSGT());
       log.setDeviceName(deviceName);
       log.setDeviceIPAddress(deviceIPAddress);
       log.setDeviceSerialNo(deviceSerialNo);

@@ -18,7 +18,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.NotFoundException;
 
 import java.math.BigDecimal;
-import java.time.LocalDate;
+import com.aisolutions.shared.util.DateUtil;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -80,7 +80,7 @@ public class StaffClaimService {
      * receipt — a June receipt handed in late lands on the July claim.
      */
     public static String currentPeriod() {
-        return LocalDate.now().format(PERIOD_FORMAT).toUpperCase(Locale.ENGLISH);
+        return DateUtil.nowSGT().toLocalDate().format(PERIOD_FORMAT).toUpperCase(Locale.ENGLISH);
     }
 
     /**
@@ -124,7 +124,7 @@ public class StaffClaimService {
     }
 
     private Uni<StaffClaim> createDraftFor(String staffId, String period) {
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = DateUtil.nowSGT();
         StaffClaim h = new StaffClaim();
         h.setStaffId(StringNormalizer.truncate(staffId, LEN_STAFF_ID));
         h.setClaimPeriod(StringNormalizer.truncate(period, LEN_PERIOD));
@@ -237,7 +237,7 @@ public class StaffClaimService {
                         new IllegalArgumentException("Cannot submit a claim with no line items"));
             }
             BigDecimal total = sumClaimAmount(lines);
-            LocalDateTime now = LocalDateTime.now();
+            LocalDateTime now = DateUtil.nowSGT();
 
             return Panache.withTransaction(() -> headerRepo.findById(headerId).flatMap(h -> {
                 if (h == null) {
@@ -339,7 +339,7 @@ public class StaffClaimService {
             return Panache.withTransaction(() -> headerRepo.findById(headerId).flatMap(h -> {
                 if (h == null) return Uni.createFrom().nullItem();
                 h.setClaimAmount(total);
-                h.setLastEditDate(LocalDateTime.now());
+                h.setLastEditDate(DateUtil.nowSGT());
                 return headerRepo.update(h);
             }));
         });

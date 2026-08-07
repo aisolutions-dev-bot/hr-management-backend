@@ -7,6 +7,7 @@ import com.aisolutions.hrmanagement.service.CurrencyService;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
 import com.aisolutions.hrmanagement.service.attachment.AttachmentService;
 import com.aisolutions.hrmanagement.util.StringNormalizer;
+import com.aisolutions.shared.util.DateUtil;
 
 import io.quarkus.hibernate.reactive.panache.Panache;
 import io.smallrye.mutiny.Uni;
@@ -14,9 +15,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
-import java.time.ZoneId;
 import java.util.List;
 
 /**
@@ -77,10 +78,10 @@ public class StaffClaimDetailService {
                         ? user.getStaffId()
                         : dto.getStaffId();
 
-                // 0. Convert the original amount to base server-side (multiply-to-base),
-                //    resolving the currency + rate from m01Currency — never trusting a
-                //    client-sent rate. A currency with no rate fails the save here.
-                return currencyService.toBase(originalAmount, dto.getCurrency()).flatMap(conv ->
+                // 0. Convert to base server-side from m01Currency/m01CurrencyDet —
+                //    never trusting a client-sent rate.
+                return currencyService.toBase(originalAmount, dto.getCurrency(), resolveRateDate(dto))
+                    .flatMap(conv ->
                     // 1. Persist the claim (in transaction)
                     Panache.withTransaction(() ->
                         claimRepo.save(buildEntity(dto, staffId, originalAmount, conv))
@@ -123,7 +124,9 @@ public class StaffClaimDetailService {
     }
 
     public Uni<List<StaffClaimDetailDTO>> listCurrentMonth(String staffId) {
-        YearMonth ym = YearMonth.now(ZoneId.systemDefault());
+        // SGT, not the server zone — on a UTC container this window would otherwise
+        // still show last month for the first 8 hours of every 1st.
+        YearMonth ym = YearMonth.from(DateUtil.nowSGT());
         LocalDateTime from = ym.atDay(1).atStartOfDay();
         LocalDateTime to = ym.plusMonths(1).atDay(1).atStartOfDay();
         return claimRepo.findByStaffAndDateRange(staffId, from, to)
@@ -150,10 +153,23 @@ public class StaffClaimDetailService {
             throw new IllegalArgumentException("Amount must be greater than zero");
     }
 
+    /**
+     * The date whose month picks the exchange rate — the receipt date (when the money
+     * was spent), else the claim date, else today.
+     *
+     * Today is SGT, not the server default: on a UTC container a receipt added before
+     * 08:00 SGT on the 1st would resolve to the previous month.
+     */
+    private LocalDate resolveRateDate(StaffClaimDetailDTO dto) {
+        if (dto.getReceiptDate() != null) return dto.getReceiptDate().toLocalDate();
+        if (dto.getClaimDate() != null)   return dto.getClaimDate().toLocalDate();
+        return DateUtil.nowSGT().toLocalDate();
+    }
+
     private StaffClaimDetail buildEntity(StaffClaimDetailDTO dto, String staffIdOverride,
                                          BigDecimal originalAmount, CurrencyService.Converted conv) {
         StaffClaimDetail e = new StaffClaimDetail();
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = DateUtil.nowSGT();
 
         e.setStaffId(StringNormalizer.truncate(
                 staffIdOverride != null ? staffIdOverride : dto.getStaffId(), LEN_STAFF_ID));

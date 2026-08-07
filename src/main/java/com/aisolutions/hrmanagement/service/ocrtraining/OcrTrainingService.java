@@ -14,6 +14,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.math.BigDecimal;
+import com.aisolutions.shared.util.DateUtil;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.regex.Matcher;
@@ -84,7 +85,7 @@ public class OcrTrainingService {
 
         OcrCorrection rec = new OcrCorrection();
         rec.setStaffId(staffId);
-        rec.setTimestamp(LocalDateTime.now());
+        rec.setTimestamp(DateUtil.nowSGT());
         rec.setRawText(rawText);
 
         rec.setOcrMerchantName(ocr.getMerchantName());
@@ -138,7 +139,7 @@ public class OcrTrainingService {
                     existing.setHitCount(existing.getHitCount() + 1);
                     existing.setConfidence(Math.min(100,
                             existing.getConfidence() + (wasCorrected ? 5 : 10)));
-                    existing.setLastUsed(LocalDateTime.now());
+                    existing.setLastUsed(DateUtil.nowSGT());
                     return aliasRepo.update(existing).replaceWithVoid();
                 }
                 OcrMerchantAlias a = new OcrMerchantAlias();
@@ -146,9 +147,9 @@ public class OcrTrainingService {
                 a.setCorrectName(correctName);
                 a.setConfidence(wasCorrected ? 30 : 60);
                 a.setHitCount(1);
-                a.setLastUsed(LocalDateTime.now());
+                a.setLastUsed(DateUtil.nowSGT());
                 a.setEntryStaff(staffId);
-                a.setEntryDate(LocalDateTime.now());
+                a.setEntryDate(DateUtil.nowSGT());
                 return aliasRepo.save(a).replaceWithVoid();
             });
     }
@@ -233,7 +234,7 @@ public class OcrTrainingService {
                 }
                 rule.setHitCount(rule.getHitCount() + 1);
                 rule.setConfidence(Math.min(100, rule.getConfidence() + 8));
-                rule.setLastUsed(LocalDateTime.now());
+                rule.setLastUsed(DateUtil.nowSGT());
                 return existing != null
                         ? merchantRuleRepo.update(rule).replaceWithVoid()
                         : merchantRuleRepo.save(rule).replaceWithVoid();
@@ -250,7 +251,7 @@ public class OcrTrainingService {
                 if (dateFormat != null) rule.setDateFormat(dateFormat);
                 rule.setHitCount(rule.getHitCount() + 1);
                 rule.setConfidence(Math.min(100, rule.getConfidence() + 8));
-                rule.setLastUsed(LocalDateTime.now());
+                rule.setLastUsed(DateUtil.nowSGT());
                 return existing != null
                         ? merchantRuleRepo.update(rule).replaceWithVoid()
                         : merchantRuleRepo.save(rule).replaceWithVoid();
@@ -266,7 +267,7 @@ public class OcrTrainingService {
                 rule.setAmountKeyword(keyword);
                 rule.setHitCount(rule.getHitCount() + 1);
                 rule.setConfidence(Math.min(100, rule.getConfidence() + 8));
-                rule.setLastUsed(LocalDateTime.now());
+                rule.setLastUsed(DateUtil.nowSGT());
                 return existing != null
                         ? merchantRuleRepo.update(rule).replaceWithVoid()
                         : merchantRuleRepo.save(rule).replaceWithVoid();
@@ -278,9 +279,9 @@ public class OcrTrainingService {
         r.setMerchantName(merchantKey);
         r.setConfidence(30);
         r.setHitCount(0);
-        r.setLastUsed(LocalDateTime.now());
+        r.setLastUsed(DateUtil.nowSGT());
         r.setEntryStaff(staffId);
-        r.setEntryDate(LocalDateTime.now());
+        r.setEntryDate(DateUtil.nowSGT());
         return r;
     }
 
@@ -305,7 +306,7 @@ public class OcrTrainingService {
                         rule.setConfidence(30);
                         rule.setHitCount(0);
                         rule.setConfirmedByCount(1);
-                        rule.setEntryDate(LocalDateTime.now());
+                        rule.setEntryDate(DateUtil.nowSGT());
                     }
                     if (valuePattern != null) rule.setValuePattern(valuePattern);
                     if (dateFormat != null) rule.setDateFormat(dateFormat);
@@ -318,7 +319,7 @@ public class OcrTrainingService {
                     // Confidence: +5 per hit, +10 bonus when a NEW merchant confirms
                     int boost = 5 + (newConfirmed > oldConfirmed ? 10 : 0);
                     rule.setConfidence(Math.min(100, rule.getConfidence() + boost));
-                    rule.setLastUsed(LocalDateTime.now());
+                    rule.setLastUsed(DateUtil.nowSGT());
 
                     return isNew
                             ? globalRuleRepo.save(rule).replaceWithVoid()
@@ -357,7 +358,7 @@ public class OcrTrainingService {
                 .flatMap(alias -> {
                     if (alias != null && alias.getConfidence() >= MIN_RULE_CONFIDENCE_FOR_APPLY) {
                         alias.setHitCount(alias.getHitCount() + 1);
-                        alias.setLastUsed(LocalDateTime.now());
+                        alias.setLastUsed(DateUtil.nowSGT());
                         return Panache.withTransaction(() -> aliasRepo.update(alias))
                             .map(ignore -> alias.getCorrectName());
                     }
@@ -728,7 +729,7 @@ public class OcrTrainingService {
     }
 
     private boolean isValidDate(int y, int m, int d) {
-        if (y < 2000 || y > LocalDateTime.now().getYear() + 1) return false;
+        if (y < 2000 || y > DateUtil.nowSGT().getYear() + 1) return false;
         if (m < 1 || m > 12 || d < 1 || d > 31) return false;
         try {
             LocalDateTime.of(y, m, d, 0, 0);
