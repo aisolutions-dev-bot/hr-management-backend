@@ -33,7 +33,7 @@ public class StaffClaimDTO {
     private String status;
     private LocalDateTime submittedDate;
     private BigDecimal approvedAmount;
-    /** Sum of REJECTED line amounts — the struck-off total. */
+    /** Sum of REJECTED line amounts. Voided receipts are struck off the claim and excluded here. */
     private BigDecimal rejectedAmount;
 
     /** Line items — populated when fetching a single claim; may be empty/null in list views. */

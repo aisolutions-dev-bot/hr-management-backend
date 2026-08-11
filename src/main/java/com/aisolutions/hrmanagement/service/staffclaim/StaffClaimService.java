@@ -537,13 +537,13 @@ public class StaffClaimService {
     }
 
     /**
-     * After a staff void/resubmit, recompute the header total (VOID excluded) and roll
-     * the header status up from the surviving receipt decisions — mirrors the admin
-     * rollup in hr-administration ClaimApprovalService, with VOID receipts excluded.
+     * After a staff void/resubmit, recompute the header total (voided receipts excluded) and roll
+     * the header status up from the surviving receipt decisions — mirrors the admin rollup in
+     * hr-administration ClaimApprovalService, with voided receipts struck off entirely.
      */
     private Uni<StaffClaim> recalcAndRollup(Long headerId, String actor) {
         return detailRepo.findByHeaderId(headerId).flatMap(lines -> {
-            BigDecimal total = sumClaimAmount(lines); // excludes VOID
+            BigDecimal total = sumClaimAmount(lines); // voided receipts excluded
             int approved = 0, rejected = 0, pending = 0, voided = 0;
             BigDecimal approvedAmt = BigDecimal.ZERO;
             BigDecimal rejectedAmt = BigDecimal.ZERO;
@@ -551,9 +551,8 @@ public class StaffClaimService {
                 String st = l.getStatus();
                 BigDecimal amt = l.getClaimAmount() == null ? BigDecimal.ZERO : l.getClaimAmount();
                 if (LINE_VOID.equalsIgnoreCase(st)) {
-                    // Accepted rejection: struck off the claim total, but it IS the rejected
-                    // amount (the claimant accepted that it won't be paid).
-                    rejectedAmt = rejectedAmt.add(amt);
+                    // Accepted rejection: struck off entirely — excluded from the claim total and
+                    // from every amount (approved/rejected), as if the receipt no longer exists.
                     voided++;
                     continue;
                 }
@@ -620,8 +619,9 @@ public class StaffClaimService {
     }
 
     private BigDecimal sumClaimAmount(List<StaffClaimDetail> lines) {
+        // A voided (accepted-rejection) receipt is struck off entirely — excluded from the claim
+        // total and from every amount, as if it no longer exists.
         return lines.stream()
-                // a voided (accepted-rejection) receipt is struck off the total.
                 .filter(l -> !LINE_VOID.equalsIgnoreCase(l.getStatus()))
                 .map(l -> l.getClaimAmount() == null ? BigDecimal.ZERO : l.getClaimAmount())
                 .reduce(BigDecimal.ZERO, (sum, value) -> sum.add(value));

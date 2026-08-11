@@ -64,7 +64,7 @@ public class StaffClaim {
     @Column(name = "ApprovedAmount", precision = 8, scale = 2)
     private BigDecimal approvedAmount;
 
-    /** Sum of REJECTED line ClaimAmounts — the struck-off total (excludes VOID). */
+    /** Sum of REJECTED line ClaimAmounts. Voided receipts are struck off the claim and excluded here. */
     @Column(name = "RejectedAmount", precision = 18, scale = 2)
     private BigDecimal rejectedAmount;
 }
