@@ -65,6 +65,23 @@ public class StaffClaimDetailRepository implements PanacheRepositoryBase<StaffCl
         );
     }
 
+    /**
+     * The claim id owning the staff member's receipt with this number, or null. Used to
+     * deep-link a rejection notification (which carries the receipt number) to its claim.
+     */
+    public Uni<Long> findClaimIdByStaffAndReceiptNumber(String staffId, String receiptNumber) {
+        return getSession().flatMap(session ->
+            session.createQuery(
+                "SELECT d.claimId FROM StaffClaimDetail d WHERE d.staffId = :staffId "
+                    + "AND d.receiptNumber = :rn ORDER BY d.uniqId DESC",
+                Long.class)
+                .setParameter("staffId", staffId)
+                .setParameter("rn", receiptNumber)
+                .setMaxResults(1)
+                .getResultList()
+        ).map(list -> list.isEmpty() ? null : list.get(0));
+    }
+
     public Uni<StaffClaimDetail> save(StaffClaimDetail entity) {
         return getSession().flatMap(session ->
             session.persist(entity).replaceWith(entity));

@@ -110,6 +110,44 @@ public class StaffClaimDetailService {
     }
 
     // ─────────────────────────────────────────────────────────
+    //  EDIT (rejected-receipt fix)
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * Converts a rejected-receipt edit's (editable) amount to base. Rate date = the new
+     * receipt date, else the locked claim date, else today.
+     */
+    public Uni<CurrencyService.Converted> convertForEdit(StaffClaimDetailDTO dto,
+                                                         LocalDateTime lockedClaimDate) {
+        if (dto == null) throw new IllegalArgumentException("Claim data is required");
+        BigDecimal originalAmount = dto.getReceiptAmount() != null
+                ? dto.getReceiptAmount() : dto.getClaimAmount();
+        if (originalAmount == null || originalAmount.signum() <= 0)
+            throw new IllegalArgumentException("Amount must be greater than zero");
+        LocalDate rateDate = dto.getReceiptDate() != null ? dto.getReceiptDate().toLocalDate()
+                : (lockedClaimDate != null ? lockedClaimDate.toLocalDate()
+                                           : DateUtil.nowSGT().toLocalDate());
+        return currencyService.toBase(originalAmount, dto.getCurrency(), rateDate);
+    }
+
+    /**
+     * Overwrites the editable fields of a rejected-receipt fix and the re-converted amount.
+     * Locked (kept from the original): Project, Claim Type, Description, Claim Date.
+     */
+    public void applyEditedFields(StaffClaimDetail e, StaffClaimDetailDTO dto,
+                                  CurrencyService.Converted conv) {
+        BigDecimal originalAmount = dto.getReceiptAmount() != null
+                ? dto.getReceiptAmount() : dto.getClaimAmount();
+        e.setMerchantName(StringNormalizer.truncate(dto.getMerchantName(), LEN_MERCHANT_NAME));
+        e.setReceiptNumber(StringNormalizer.truncate(dto.getReceiptNumber(), LEN_RECEIPT_NUMBER));
+        e.setReceiptDate(dto.getReceiptDate());
+        e.setReceiptAmount(originalAmount);
+        e.setClaimAmount(conv.baseAmount());
+        e.setCurrency(StringNormalizer.truncate(conv.currencyCode(), LEN_CURRENCY));
+        e.setExchangeRate(conv.rateUsed());
+    }
+
+    // ─────────────────────────────────────────────────────────
     //  READ
     // ─────────────────────────────────────────────────────────
 
@@ -124,8 +162,7 @@ public class StaffClaimDetailService {
     }
 
     public Uni<List<StaffClaimDetailDTO>> listCurrentMonth(String staffId) {
-        // SGT, not the server zone — on a UTC container this window would otherwise
-        // still show last month for the first 8 hours of every 1st.
+        // Current month in SGT, not the server zone.
         YearMonth ym = YearMonth.from(DateUtil.nowSGT());
         LocalDateTime from = ym.atDay(1).atStartOfDay();
         LocalDateTime to = ym.plusMonths(1).atDay(1).atStartOfDay();
@@ -155,10 +192,7 @@ public class StaffClaimDetailService {
 
     /**
      * The date whose month picks the exchange rate — the receipt date (when the money
-     * was spent), else the claim date, else today.
-     *
-     * Today is SGT, not the server default: on a UTC container a receipt added before
-     * 08:00 SGT on the 1st would resolve to the previous month.
+     * was spent), else the claim date, else today (SGT).
      */
     private LocalDate resolveRateDate(StaffClaimDetailDTO dto) {
         if (dto.getReceiptDate() != null) return dto.getReceiptDate().toLocalDate();

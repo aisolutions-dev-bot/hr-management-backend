@@ -33,6 +33,8 @@ public class StaffClaimDTO {
     private String status;
     private LocalDateTime submittedDate;
     private BigDecimal approvedAmount;
+    /** Sum of REJECTED line amounts — the struck-off total. */
+    private BigDecimal rejectedAmount;
 
     /** Line items — populated when fetching a single claim; may be empty/null in list views. */
     private List<StaffClaimDetailDTO> lines;

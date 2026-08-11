@@ -5,10 +5,15 @@ import com.aisolutions.hrmanagement.dto.StaffClaimDTO;
 import com.aisolutions.hrmanagement.dto.StaffClaimDetailDTO;
 import com.aisolutions.hrmanagement.entity.StaffClaim;
 import com.aisolutions.hrmanagement.entity.StaffClaimDetail;
+import com.aisolutions.hrmanagement.repository.NotificationRepository;
 import com.aisolutions.hrmanagement.repository.StaffClaimDetailRepository;
 import com.aisolutions.hrmanagement.repository.StaffClaimRepository;
+import com.aisolutions.hrmanagement.repository.StaffRepository;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
+import com.aisolutions.hrmanagement.service.SystemParameterService;
 import com.aisolutions.hrmanagement.service.attachment.AttachmentService;
+import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService;
+import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService.DeviceInfo;
 import com.aisolutions.hrmanagement.util.StringNormalizer;
 
 import io.quarkus.hibernate.reactive.panache.Panache;
@@ -18,6 +23,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.NotFoundException;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import com.aisolutions.shared.util.DateUtil;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -45,6 +51,17 @@ public class StaffClaimService {
     public static final String STATUS_PARTIAL    = "PARTIALLY-APPROVED";
     public static final String STATUS_REJECTED   = "REJECTED";
     public static final String STATUS_PAID       = "PAID";
+    public static final String STATUS_VOIDED     = "VOIDED";
+
+    // Line (receipt) status values — mirror hr-administration ClaimApprovalService.
+    // VOID: the staff accepted a rejection, so the receipt is struck off the claim
+    // and excluded from the total.
+    public static final String LINE_PENDING  = "PENDING";
+    public static final String LINE_APPROVED = "APPROVED";
+    public static final String LINE_REJECTED = "REJECTED";
+    public static final String LINE_VOID     = "VOID";
+
+    private static final int LEN_DESCRIPTION = 100;
 
     private static final int LEN_STAFF_ID = 25;
     private static final int LEN_PERIOD   = 50;
@@ -58,11 +75,31 @@ public class StaffClaimService {
     private static final DateTimeFormatter PERIOD_FORMAT =
             DateTimeFormatter.ofPattern("MMMM-yyyy", Locale.ENGLISH);
 
+    // ── Audit-log + notification wiring ──
+    /** m07UserActionLog.Module / m07Notifications.ModuleId for HRMS claim actions. */
+    private static final String MODULE_ID = "mod18";
+    /** m07Notifications.NotificationType — staff-facing (claim outcome) notifications. */
+    private static final String NOTIF_TYPE = "Staff-Claims";
+    /** m07Notifications.NotificationType — approver-facing (claim submitted for approval). */
+    private static final String NOTIF_TYPE_ADMIN = "Admin-Claims";
+    /** System parameter naming the staff who receives claim-submitted notifications. */
+    private static final String PARAM_HR_APPROVER = "HR-ADMIN-APPRV-IN-CHARGE";
+    private static final int LEN_LOG_REFERENCE = 45;   // m07UserActionLog.ReferenceNo
+    private static final int LEN_LOG_REMARKS   = 255;  // m07UserActionLog.Remarks
+    private static final int LEN_NOTIF_SUBJECT = 200;  // m07Notifications.NotificationSubject
+    private static final int LEN_NOTIF_DESC    = 255;  // m07Notifications.NotificationDesc
+    private static final DateTimeFormatter TS_FORMAT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+
     @Inject StaffClaimRepository headerRepo;
     @Inject StaffClaimDetailRepository detailRepo;
     @Inject StaffClaimDetailService detailService;
     @Inject CurrentUserService currentUserService;
     @Inject AttachmentService attachmentService;
+    @Inject UserActionLogService userActionLogService;
+    @Inject NotificationRepository notificationRepo;
+    @Inject StaffRepository staffRepo;
+    @Inject SystemParameterService systemParameterService;
 
     // ─────────────────────────────────────────────────────────
     //  CREATE DRAFT
@@ -180,12 +217,17 @@ public class StaffClaimService {
 
     public Uni<StaffClaimDetailDTO> addLine(
             Long headerId, StaffClaimDetailDTO lineDto,
-            byte[] photoData, String photoFileName, String photoContentType) {
+            byte[] photoData, String photoFileName, String photoContentType,
+            DeviceInfo deviceInfo) {
 
         return requireDraft(headerId).flatMap(h -> {
             lineDto.setClaimId(headerId);
             return detailService.createClaim(lineDto, photoData, photoFileName, photoContentType)
-                    .flatMap(saved -> recalcTotal(headerId).replaceWith(saved));
+                    .flatMap(saved -> recalcTotal(headerId).replaceWith(saved))
+                    .call(saved -> logAction(saved.getStaffId(), h.getClaimPeriod(),
+                            UserActionLogService.Action.ADD,
+                            "Added receipt " + nz(saved.getReceiptNumber())
+                                    + " (" + nz(saved.getClaimType()) + ")", deviceInfo));
         });
     }
 
@@ -230,7 +272,7 @@ public class StaffClaimService {
     //  SUBMIT
     // ─────────────────────────────────────────────────────────
 
-    public Uni<StaffClaimDTO> submit(Long headerId) {
+    public Uni<StaffClaimDTO> submit(Long headerId, DeviceInfo deviceInfo) {
         return detailRepo.findByHeaderId(headerId).flatMap(lines -> {
             if (lines.isEmpty()) {
                 return Uni.createFrom().failure(
@@ -264,7 +306,12 @@ public class StaffClaimService {
                     h.setLastEditDate(now);
                     return headerRepo.update(h);
                 });
-            })).map(saved -> toHeaderDto(saved, null));
+            })).map(saved -> toHeaderDto(saved, null))
+              .call(dto -> logAction(dto.getEntryStaff(), dto.getClaimPeriod(),
+                      UserActionLogService.Action.SUBMIT,
+                      "Submitted claim " + nz(dto.getClaimPeriod()) + " of amount "
+                              + plain(dto.getClaimAmount()), deviceInfo))
+              .call(this::notifyClaimSubmitted);
         });
     }
 
@@ -278,7 +325,7 @@ public class StaffClaimService {
      * batch submitted, which is recoverable and visible, since each claim's status is
      * shown in the list the user returns to.
      */
-    public Uni<List<StaffClaimDTO>> submitBatch(List<Long> headerIds) {
+    public Uni<List<StaffClaimDTO>> submitBatch(List<Long> headerIds, DeviceInfo deviceInfo) {
         if (headerIds == null || headerIds.isEmpty()) {
             return Uni.createFrom().failure(
                     new IllegalArgumentException("Select at least one claim to submit"));
@@ -292,7 +339,7 @@ public class StaffClaimService {
 
         Uni<List<StaffClaimDTO>> chain = validated.replaceWith(new ArrayList<>());
         for (Long id : ids) {
-            chain = chain.flatMap(acc -> submit(id).map(dto -> {
+            chain = chain.flatMap(acc -> submit(id, deviceInfo).map(dto -> {
                 acc.add(dto);
                 return acc;
             }));
@@ -345,6 +392,218 @@ public class StaffClaimService {
         });
     }
 
+    // ─────────────────────────────────────────────────────────
+    //  REJECTED-RECEIPT WORKFLOW (staff side)
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * Staff accepts a rejection (scenario 2): the receipt is voided — struck off the
+     * claim and excluded from the total. Only a REJECTED receipt can be voided. The
+     * header total + status are rolled up afterwards.
+     */
+    public Uni<StaffClaimDTO> acceptRejection(Long headerId, Long lineId, DeviceInfo deviceInfo) {
+        return currentUserService.getCurrentUserLoginId().flatMap(actor ->
+            Panache.withTransaction(() ->
+                requireLine(headerId, lineId).flatMap(line -> {
+                    if (!LINE_REJECTED.equalsIgnoreCase(line.getStatus())) {
+                        return Uni.<StaffClaimDetail>createFrom().failure(new IllegalArgumentException(
+                                "Only a rejected receipt can be voided (current status: "
+                                        + line.getStatus() + ")"));
+                    }
+                    LocalDateTime now = DateUtil.nowSGT();
+                    line.setStatus(LINE_VOID);
+                    line.setLastEditStaff(actor);
+                    line.setLastEditDate(now);
+                    return detailRepo.update(line);
+                })
+            )
+            .flatMap(v -> recalcAndRollup(headerId, actor))
+            .flatMap(h -> getWithLines(headerId))
+            .call(dto -> logAction(actor, dto.getClaimPeriod(), UserActionLogService.Action.VOID,
+                    "Accepted rejection — voided receipt " + lineId, deviceInfo))
+        );
+    }
+
+    /**
+     * Staff fixes or appeals a rejected receipt and resubmits it (scenarios 1 & 2):
+     * the receipt returns to PENDING for re-review and the header goes back under
+     * review. An optional appeal note is written to the receipt's description.
+     * (Re-attaching the receipt photo is a separate call on the attachment endpoint.)
+     */
+    public Uni<StaffClaimDTO> resubmitRejectedLine(Long headerId, Long lineId,
+            String appealDescription, DeviceInfo deviceInfo) {
+        return currentUserService.getCurrentUserLoginId().flatMap(actor ->
+            Panache.withTransaction(() ->
+                requireLine(headerId, lineId).flatMap(line -> {
+                    if (!LINE_REJECTED.equalsIgnoreCase(line.getStatus())) {
+                        return Uni.<StaffClaimDetail>createFrom().failure(new IllegalArgumentException(
+                                "Only a rejected receipt can be resubmitted (current status: "
+                                        + line.getStatus() + ")"));
+                    }
+                    LocalDateTime now = DateUtil.nowSGT();
+                    if (appealDescription != null && !appealDescription.isBlank()) {
+                        String d = appealDescription.trim();
+                        line.setClaimDescription(
+                                d.length() > LEN_DESCRIPTION ? d.substring(0, LEN_DESCRIPTION) : d);
+                    }
+                    line.setStatus(LINE_PENDING);
+                    line.setApprovedBy(null);
+                    line.setApprovedDate(null);
+                    // RejectReason is left intact as history; the reject trail also lives
+                    // in m07UserActionLog.
+                    line.setLastEditStaff(actor);
+                    line.setLastEditDate(now);
+                    return detailRepo.update(line);
+                })
+            )
+            .flatMap(v -> recalcAndRollup(headerId, actor))
+            .flatMap(h -> getWithLines(headerId))
+            .call(dto -> logAction(actor, dto.getClaimPeriod(), UserActionLogService.Action.EDIT,
+                    "Resubmitted receipt " + lineId
+                            + (appealDescription != null && !appealDescription.isBlank()
+                                    ? " with appeal" : ""), deviceInfo))
+            .call(this::notifyClaimResubmitted)
+        );
+    }
+
+    /**
+     * Staff fixes a rejected receipt (details + amount + optional new photo) and resubmits
+     * it (→ PENDING). Project, Claim Type, Description and Claim Date are locked.
+     */
+    public Uni<StaffClaimDTO> editRejectedLine(Long headerId, Long lineId, StaffClaimDetailDTO dto,
+            byte[] photoData, String photoFileName, String photoContentType) {
+        return currentUserService.getCurrentUserLoginId().flatMap(actor ->
+            requireLine(headerId, lineId).flatMap(line -> {
+                if (!LINE_REJECTED.equalsIgnoreCase(line.getStatus())) {
+                    return Uni.<StaffClaimDetail>createFrom().failure(new IllegalArgumentException(
+                            "Only a rejected receipt can be edited (current status: "
+                                    + line.getStatus() + ")"));
+                }
+                // Convert the edited amount to base before the write transaction (mirrors create);
+                // the locked claim date is the rate-date fallback.
+                return detailService.convertForEdit(dto, line.getClaimDate()).flatMap(conv ->
+                    Panache.withTransaction(() ->
+                        requireLine(headerId, lineId).flatMap(fresh -> {
+                            detailService.applyEditedFields(fresh, dto, conv);
+                            LocalDateTime now = DateUtil.nowSGT();
+                            fresh.setStatus(LINE_PENDING);
+                            fresh.setApprovedBy(null);
+                            fresh.setApprovedDate(null);
+                            fresh.setLastEditStaff(actor);
+                            fresh.setLastEditDate(now);
+                            return detailRepo.update(fresh);
+                        })
+                    )
+                );
+            })
+            .flatMap(saved -> applyPhotoChange(lineId, photoData, photoFileName, photoContentType)
+                    .replaceWith(saved))
+            .flatMap(v -> recalcAndRollup(headerId, actor))
+            .flatMap(h -> getWithLines(headerId))
+            .call(this::notifyClaimResubmitted)
+        );
+    }
+
+    /**
+     * Uploads a replacement receipt photo as a new version (the old one is kept). Runs
+     * outside the row transaction; a failed upload never undoes the committed edit.
+     */
+    private Uni<Void> applyPhotoChange(Long lineId,
+            byte[] photoData, String photoFileName, String photoContentType) {
+        if (photoData != null && photoData.length > 0) {
+            return attachmentService.uploadFile(
+                    StaffClaimDetailService.MODULE_TYPE, String.valueOf(lineId),
+                    photoFileName != null ? photoFileName : "receipt.jpg",
+                    photoContentType != null ? photoContentType : "image/jpeg",
+                    photoData)
+                .replaceWithVoid()
+                .onFailure().recoverWithItem((Void) null);
+        }
+        return Uni.createFrom().voidItem();
+    }
+
+    /** Loads a receipt and fails unless it exists and belongs to the given claim. */
+    private Uni<StaffClaimDetail> requireLine(Long headerId, Long lineId) {
+        return detailRepo.findById(lineId).flatMap(line -> {
+            if (line == null) {
+                return Uni.createFrom().failure(new NotFoundException("Receipt " + lineId + " not found"));
+            }
+            if (!headerId.equals(line.getClaimId())) {
+                return Uni.createFrom().failure(new IllegalArgumentException(
+                        "Receipt " + lineId + " does not belong to claim " + headerId));
+            }
+            return Uni.createFrom().item(line);
+        });
+    }
+
+    /**
+     * After a staff void/resubmit, recompute the header total (VOID excluded) and roll
+     * the header status up from the surviving receipt decisions — mirrors the admin
+     * rollup in hr-administration ClaimApprovalService, with VOID receipts excluded.
+     */
+    private Uni<StaffClaim> recalcAndRollup(Long headerId, String actor) {
+        return detailRepo.findByHeaderId(headerId).flatMap(lines -> {
+            BigDecimal total = sumClaimAmount(lines); // excludes VOID
+            int approved = 0, rejected = 0, pending = 0, voided = 0;
+            BigDecimal approvedAmt = BigDecimal.ZERO;
+            BigDecimal rejectedAmt = BigDecimal.ZERO;
+            for (StaffClaimDetail l : lines) {
+                String st = l.getStatus();
+                BigDecimal amt = l.getClaimAmount() == null ? BigDecimal.ZERO : l.getClaimAmount();
+                if (LINE_VOID.equalsIgnoreCase(st)) {
+                    // Accepted rejection: struck off the claim total, but it IS the rejected
+                    // amount (the claimant accepted that it won't be paid).
+                    rejectedAmt = rejectedAmt.add(amt);
+                    voided++;
+                    continue;
+                }
+                if (LINE_APPROVED.equalsIgnoreCase(st)) {
+                    approved++;
+                    approvedAmt = approvedAmt.add(amt);
+                } else if (LINE_REJECTED.equalsIgnoreCase(st)) {
+                    rejected++;
+                    rejectedAmt = rejectedAmt.add(amt);
+                } else {
+                    pending++;
+                }
+            }
+            final String newStatus;
+            if (pending > 0) {
+                newStatus = STATUS_SUBMITTED;             // back under review
+            } else if (approved > 0 && rejected > 0) {
+                newStatus = STATUS_PARTIAL;
+            } else if (approved > 0) {
+                newStatus = STATUS_APPROVED;
+            } else if (rejected > 0) {
+                newStatus = STATUS_REJECTED;
+            } else if (voided > 0) {
+                newStatus = STATUS_VOIDED;                // every receipt voided
+            } else {
+                newStatus = STATUS_SUBMITTED;
+            }
+            final BigDecimal frozenApproved = (pending > 0) ? null : approvedAmt;
+            final BigDecimal frozenRejected = rejectedAmt;
+            // A void can turn a partially-approved claim (its last rejected receipt struck
+            // off) into a wholly-approved one — notify the claimant, mirroring the admin
+            // approve path. resubmit never reaches APPROVED (a pending line forces
+            // SUBMITTED), so the new status alone is a safe transition signal here.
+            final boolean becameApproved = STATUS_APPROVED.equals(newStatus);
+            return Panache.withTransaction(() -> headerRepo.findById(headerId).flatMap(h -> {
+                if (h == null) return Uni.createFrom().nullItem();
+                h.setClaimAmount(total);
+                h.setStatus(newStatus);
+                h.setApprovedAmount(frozenApproved);
+                h.setRejectedAmount(frozenRejected);
+                h.setLastEditStaff(actor);
+                h.setLastEditDate(DateUtil.nowSGT());
+                return headerRepo.update(h);
+            }))
+            .call(saved -> (becameApproved && saved != null)
+                    ? notifyClaimApproved(saved)
+                    : Uni.createFrom().voidItem());
+        });
+    }
+
     /** Next numbered period under a base month, e.g. "JULY-2026" → "JULY-2026-002" given an
      *  existing "JULY-2026-001"; zero-padded to three digits. */
     private String nextNumberedPeriod(String basePeriod, List<String> existing) {
@@ -362,8 +621,144 @@ public class StaffClaimService {
 
     private BigDecimal sumClaimAmount(List<StaffClaimDetail> lines) {
         return lines.stream()
+                // a voided (accepted-rejection) receipt is struck off the total.
+                .filter(l -> !LINE_VOID.equalsIgnoreCase(l.getStatus()))
                 .map(l -> l.getClaimAmount() == null ? BigDecimal.ZERO : l.getClaimAmount())
                 .reduce(BigDecimal.ZERO, (sum, value) -> sum.add(value));
+    }
+
+    // ─────────────────────────────────────────────────────────
+    //  AUDIT LOG + NOTIFICATIONS (best-effort)
+    // ─────────────────────────────────────────────────────────
+    // These never fail the business action they trail: each swallows its own error.
+
+    /** Writes one m07UserActionLog row (device info from the request); failures are swallowed. */
+    private Uni<Void> logAction(String staffId, String referenceNo, String action,
+                                String remarks, DeviceInfo deviceInfo) {
+        return userActionLogService.logAction(staffId, UserActionLogService.Module.STAFF_CLAIM,
+                truncate(referenceNo, LEN_LOG_REFERENCE), action, deviceInfo,
+                truncate(remarks, LEN_LOG_REMARKS));
+    }
+
+    /**
+     * On submit, notify the HR approver named by the HR-ADMIN-APPRV-IN-CHARGE system
+     * parameter. A missing parameter or unknown staff name degrades to a skip / the raw
+     * id rather than failing the submit.
+     */
+    private Uni<Void> notifyClaimSubmitted(StaffClaimDTO claim) {
+        String submitter = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
+        return systemParameterService.loadParameter(PARAM_HR_APPROVER)
+            .onFailure().recoverWithItem((String) null)
+            .flatMap(recipient -> {
+                if (recipient == null || recipient.isBlank()) {
+                    System.err.println("[Notification] " + PARAM_HR_APPROVER
+                            + " not configured — submit notification skipped for claim "
+                            + claim.getUniqId());
+                    return Uni.createFrom().voidItem();
+                }
+                // Sequential (never combined) — these reads share one reactive session.
+                return staffRepo.findNameByStaffId(submitter)
+                    .onFailure().recoverWithItem((String) null)
+                    .flatMap(name -> loadBaseCurrencySafe().flatMap(baseCcy -> {
+                        String who = (name != null && !name.isBlank()) ? name : submitter;
+                        String subject = "You received staff claim submitted by " + who
+                                + " - " + nz(claim.getClaimPeriod());
+                        String desc = "You have received a claims submitted by " + who
+                                + " of amount " + money(baseCcy, claim.getClaimAmount())
+                                + " for claim period " + nz(claim.getClaimPeriod())
+                                + " submitted on " + ts(claim.getSubmittedDate()) + ".";
+                        return createNotification(NOTIF_TYPE_ADMIN, subject, desc, recipient,
+                                submitter, refOf(claim.getUniqId()));
+                    }));
+            })
+            .onFailure().recoverWithItem((Void) null);
+    }
+
+    /**
+     * On resubmit, notify the HR approver that a previously-rejected receipt is back for
+     * review. Mirrors {@link #notifyClaimSubmitted}; a missing approver parameter is skipped.
+     */
+    private Uni<Void> notifyClaimResubmitted(StaffClaimDTO claim) {
+        String submitter = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
+        return systemParameterService.loadParameter(PARAM_HR_APPROVER)
+            .onFailure().recoverWithItem((String) null)
+            .flatMap(recipient -> {
+                if (recipient == null || recipient.isBlank()) {
+                    return Uni.createFrom().voidItem();
+                }
+                return staffRepo.findNameByStaffId(submitter)
+                    .onFailure().recoverWithItem((String) null)
+                    .flatMap(name -> {
+                        String who = (name != null && !name.isBlank()) ? name : submitter;
+                        String subject = "Receipt resubmitted for review by " + who
+                                + " - " + nz(claim.getClaimPeriod());
+                        String desc = who + " has resubmitted a receipt for claim period "
+                                + nz(claim.getClaimPeriod()) + " for your review.";
+                        return createNotification(NOTIF_TYPE_ADMIN, subject, desc, recipient,
+                                submitter, refOf(claim.getUniqId()));
+                    });
+            })
+            .onFailure().recoverWithItem((Void) null);
+    }
+
+    /** Notifies the claimant that their claim is wholly approved. */
+    private Uni<Void> notifyClaimApproved(StaffClaim claim) {
+        String claimant = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
+        if (claimant == null || claimant.isBlank()) {
+            return Uni.createFrom().voidItem();
+        }
+        return loadBaseCurrencySafe().flatMap(baseCcy -> {
+            String subject = "Your " + nz(claim.getClaimPeriod()) + " claim is approved.";
+            String desc = "Your claim for " + nz(claim.getClaimPeriod())
+                    + " of amount " + money(baseCcy, claim.getClaimAmount())
+                    + " submitted on " + ts(claim.getSubmittedDate()) + " is being approved.";
+            return createNotification(NOTIF_TYPE, subject, desc, claimant, claimant,
+                    refOf(claim.getUniqId()));
+        })
+        .onFailure().recoverWithItem((Void) null);
+    }
+
+    private Uni<Void> createNotification(String notificationType, String subject, String desc,
+                                         String notifyStaff, String entryStaff, String referenceNo) {
+        return Panache.withTransaction(() ->
+                notificationRepo.create(MODULE_ID, notificationType,
+                        truncate(subject, LEN_NOTIF_SUBJECT), truncate(desc, LEN_NOTIF_DESC),
+                        notifyStaff, entryStaff, referenceNo))
+            .replaceWithVoid();
+    }
+
+    /** The claim's header id as text, for the notification reference (deep-link target). */
+    private static String refOf(Long claimId) {
+        return claimId == null ? null : String.valueOf(claimId);
+    }
+
+    /** Base currency, or null when it can't be read — the amount then prints without a code. */
+    private Uni<String> loadBaseCurrencySafe() {
+        return systemParameterService.loadBaseCurrency().onFailure().recoverWithItem((String) null);
+    }
+
+    private static String nz(String s) {
+        return s == null ? "" : s;
+    }
+
+    /** Plain 2-dp amount, no currency (used in audit remarks). */
+    private static String plain(BigDecimal amount) {
+        return amount == null ? "0.00" : amount.setScale(2, RoundingMode.HALF_UP).toPlainString();
+    }
+
+    /** "{CCY} {amount}" for notification text; drops the code if base currency is unknown. */
+    private static String money(String currency, BigDecimal amount) {
+        String value = plain(amount);
+        return (currency == null || currency.isBlank()) ? value : currency + " " + value;
+    }
+
+    private static String ts(LocalDateTime dt) {
+        return dt == null ? "" : dt.format(TS_FORMAT);
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) return null;
+        return s.length() > max ? s.substring(0, max) : s;
     }
 
     private StaffClaimDTO toHeaderDto(StaffClaim h, List<StaffClaimDetailDTO> lines) {
@@ -379,6 +774,7 @@ public class StaffClaimService {
         dto.setStatus(h.getStatus());
         dto.setSubmittedDate(h.getSubmittedDate());
         dto.setApprovedAmount(h.getApprovedAmount());
+        dto.setRejectedAmount(h.getRejectedAmount());
         dto.setLines(lines);
         dto.setLineCount(lines != null ? lines.size() : null);
         return dto;

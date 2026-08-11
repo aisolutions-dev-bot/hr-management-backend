@@ -130,6 +130,17 @@ public class SystemParameterService {
         baseCurrencyExpiry = Instant.MIN;
     }
 
+    /**
+     * A single parameter's value, or null when it is absent from m07SystemParameters.
+     * Not cached — used for infrequent, non-hot-path lookups (e.g. the claim-submit
+     * notification recipient). A missing parameter is a soft miss, not an error, so
+     * the caller can degrade gracefully rather than fail the underlying action.
+     */
+    public Uni<String> loadParameter(String name) {
+        return systemParameterRepository.getParameterMap(List.of(name))
+            .map(params -> params.get(name));
+    }
+
     private static String require(Map<String, String> params, String key) {
         String v = params.get(key);
         if (v == null || v.isBlank()) {

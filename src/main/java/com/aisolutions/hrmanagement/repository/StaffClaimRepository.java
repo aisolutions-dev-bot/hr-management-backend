@@ -45,6 +45,23 @@ public class StaffClaimRepository implements PanacheRepositoryBase<StaffClaim, L
     }
 
     /**
+     * The staff member's claim header id for a period, any status, or null. Used to
+     * deep-link a notification (which carries the period) to the claim it refers to.
+     */
+    public Uni<Long> findIdByStaffAndPeriod(String staffId, String period) {
+        return getSession().flatMap(session ->
+            session.createQuery(
+                "SELECT c.uniqId FROM StaffClaim c WHERE c.staffId = :staffId "
+                    + "AND c.claimPeriod = :period ORDER BY c.uniqId DESC",
+                Long.class)
+                .setParameter("staffId", staffId)
+                .setParameter("period", period)
+                .setMaxResults(1)
+                .getResultList()
+        ).map(list -> list.isEmpty() ? null : list.get(0));
+    }
+
+    /**
      * This staff's numbered periods under a base month (base "JULY-2026" matches
      * "JULY-2026-001"…); the plain draft "JULY-2026" is excluded by the trailing dash.
      */

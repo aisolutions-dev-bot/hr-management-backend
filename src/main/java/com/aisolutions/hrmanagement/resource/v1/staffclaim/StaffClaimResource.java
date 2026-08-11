@@ -3,13 +3,18 @@ package com.aisolutions.hrmanagement.resource.v1.staffclaim;
 import com.aisolutions.hrmanagement.dto.StaffClaimDTO;
 import com.aisolutions.hrmanagement.dto.StaffClaimDetailDTO;
 import com.aisolutions.hrmanagement.service.staffclaim.StaffClaimService;
+import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService.DeviceInfo;
+import com.aisolutions.hrmanagement.util.DeviceInfoExtractor;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 import io.smallrye.mutiny.Uni;
+import io.vertx.core.http.HttpServerRequest;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
@@ -38,6 +43,9 @@ import java.util.Map;
 public class StaffClaimResource {
 
     @Inject StaffClaimService claimService;
+
+    @Context HttpHeaders headers;
+    @Context HttpServerRequest request;
 
     private static final ObjectMapper MAPPER =
             new ObjectMapper().registerModule(new JavaTimeModule());
@@ -112,7 +120,8 @@ public class StaffClaimResource {
             }
         }
 
-        return claimService.addLine(headerId, dto, photoBytes, photoName, photoType)
+        DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
+        return claimService.addLine(headerId, dto, photoBytes, photoName, photoType, deviceInfo)
                 .map(saved -> Response.status(Response.Status.CREATED).entity(saved).build())
                 .onFailure().recoverWithItem(StaffClaimResource::toError);
     }
@@ -131,7 +140,72 @@ public class StaffClaimResource {
     @POST
     @Path("/{id}/submit")
     public Uni<Response> submit(@PathParam("id") Long headerId) {
-        return claimService.submit(headerId)
+        DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
+        return claimService.submit(headerId, deviceInfo)
+                .map(saved -> Response.ok(saved).build())
+                .onFailure().recoverWithItem(StaffClaimResource::toError);
+    }
+
+    // ── ACCEPT REJECTION (staff voids a rejected receipt) ──
+    @POST
+    @Path("/{id}/lines/{lineId}/accept-rejection")
+    public Uni<Response> acceptRejection(@PathParam("id") Long headerId,
+                                         @PathParam("lineId") Long lineId) {
+        DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
+        return claimService.acceptRejection(headerId, lineId, deviceInfo)
+                .map(saved -> Response.ok(saved).build())
+                .onFailure().recoverWithItem(StaffClaimResource::toError);
+    }
+
+    // ── RESUBMIT REJECTED RECEIPT (fix/appeal → back to PENDING) ──
+    // Body (optional): { "appealDescription": "..." }
+    @POST
+    @Path("/{id}/lines/{lineId}/resubmit")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Uni<Response> resubmitRejectedLine(@PathParam("id") Long headerId,
+                                              @PathParam("lineId") Long lineId,
+                                              Map<String, String> body) {
+        String appeal = body == null ? null : body.get("appealDescription");
+        DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
+        return claimService.resubmitRejectedLine(headerId, lineId, appeal, deviceInfo)
+                .map(saved -> Response.ok(saved).build())
+                .onFailure().recoverWithItem(StaffClaimResource::toError);
+    }
+
+    // ── EDIT & RESUBMIT REJECTED RECEIPT (scenario 1 — full edit + optional new photo) ──
+    // multipart: claim JSON + optional photo (a new photo is kept as a new version).
+    @PUT
+    @Path("/{id}/lines/{lineId}/edit-resubmit")
+    @Consumes(MediaType.MULTIPART_FORM_DATA)
+    public Uni<Response> editRejectedLine(
+            @PathParam("id") Long headerId,
+            @PathParam("lineId") Long lineId,
+            @RestForm("claim") String claimJson,
+            @RestForm("photo") FileUpload photo) {
+
+        StaffClaimDetailDTO dto;
+        try {
+            dto = MAPPER.readValue(claimJson, StaffClaimDetailDTO.class);
+        } catch (Exception e) {
+            return Uni.createFrom().item(badRequest("Invalid claim JSON: " + e.getMessage()));
+        }
+
+        byte[] photoBytes = null;
+        String photoName = null;
+        String photoType = null;
+        if (photo != null) {
+            try {
+                photoBytes = Files.readAllBytes(photo.uploadedFile());
+                photoName = photo.fileName();
+                photoType = photo.contentType();
+            } catch (IOException e) {
+                return Uni.createFrom().item(
+                        Response.serverError().entity(Map.of("error",
+                                "Failed to read photo: " + e.getMessage())).build());
+            }
+        }
+
+        return claimService.editRejectedLine(headerId, lineId, dto, photoBytes, photoName, photoType)
                 .map(saved -> Response.ok(saved).build())
                 .onFailure().recoverWithItem(StaffClaimResource::toError);
     }
@@ -141,7 +215,8 @@ public class StaffClaimResource {
     @Path("/submit-batch")
     @Consumes(MediaType.APPLICATION_JSON)
     public Uni<Response> submitBatch(List<Long> claimIds) {
-        return claimService.submitBatch(claimIds)
+        DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
+        return claimService.submitBatch(claimIds, deviceInfo)
                 .map(saved -> Response.ok(saved).build())
                 .onFailure().recoverWithItem(StaffClaimResource::toError);
     }
