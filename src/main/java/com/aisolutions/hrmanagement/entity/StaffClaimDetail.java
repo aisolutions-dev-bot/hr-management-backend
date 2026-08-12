@@ -75,6 +75,11 @@ public class StaffClaimDetail {
     @Column(name = "Currency", length = 10)
     private String currency;
 
+    /** The currency the AI/OCR read off the receipt, kept for tracing even when the
+     *  staff member relabels the line to a stocked currency. Null when no scan or no reading. */
+    @Column(name = "DetectedCurrency", length = 10)
+    private String detectedCurrency;
+
     @Column(name = "ExchangeRate", precision = 18, scale = 10)
     private BigDecimal exchangeRate;
 

@@ -1,6 +1,7 @@
 package com.aisolutions.hrmanagement.service;
 
 import com.aisolutions.hrmanagement.entity.Currency;
+import com.aisolutions.hrmanagement.entity.CurrencyDet;
 import com.aisolutions.hrmanagement.repository.CurrencyDetRepository;
 import com.aisolutions.hrmanagement.repository.CurrencyRepository;
 
@@ -13,7 +14,10 @@ import org.jboss.logging.Logger;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Converts a claim amount from the receipt's currency to the base currency
@@ -24,8 +28,9 @@ import java.util.List;
  * recording a foreign amount as if it were base is a silent, unrecoverable error.
  *
  * Rate preference: the m01CurrencyDet rate for the receipt's month, falling back to
- * the m01Currency header rate when that month is unset. The header rate stays the
- * gate on whether a currency is claimable at all.
+ * the m01Currency header rate when that month is unset. A currency is claimable when
+ * either the month rate or the header rate is set; the save is blocked only when
+ * neither resolves to a positive rate.
  */
 @ApplicationScoped
 public class CurrencyService {
@@ -45,6 +50,36 @@ public class CurrencyService {
     /** All currencies for the dropdown. */
     public Uni<List<Currency>> listCurrencies() {
         return currencyRepository.findAllOrdered();
+    }
+
+    /** A currency with its header rate and 12 month rates (null where a month is unset). */
+    public record CurrencyRates(String code, String description,
+                                BigDecimal headerRate, List<BigDecimal> months) {}
+
+    /**
+     * Currencies for the dropdown, each carrying its header rate and per-month rates, so the
+     * frontend can preview the conversion with the same month-first resolution the server
+     * applies on save (month rate when set, else header rate).
+     */
+    public Uni<List<CurrencyRates>> listCurrenciesWithRates() {
+        return currencyRepository.findAllOrdered().flatMap(currencies ->
+            currencyDetRepository.listAll().map(dets -> {
+                Map<Long, CurrencyDet> byRef = new HashMap<>();
+                for (CurrencyDet d : dets) {
+                    if (d.getRefUniqId() != null) {
+                        byRef.putIfAbsent(d.getRefUniqId(), d);
+                    }
+                }
+                return currencies.stream().map(c -> {
+                    CurrencyDet det = byRef.get(c.getUniqId());
+                    List<BigDecimal> months = new ArrayList<>(12);
+                    for (int m = 1; m <= 12; m++) {
+                        months.add(det == null ? null : det.rateForMonth(m));
+                    }
+                    String desc = c.getCurrencyDesc() != null ? c.getCurrencyDesc() : c.getCurrency();
+                    return new CurrencyRates(c.getCurrency(), desc, c.getExchangeRate(), months);
+                }).toList();
+            }));
     }
 
     /**
@@ -73,13 +108,15 @@ public class CurrencyService {
             }
 
             return currencyRepository.findByCode(code).flatMap(currency -> {
-                if (currency == null || currency.getExchangeRate() == null
-                        || currency.getExchangeRate().signum() <= 0) {
-                    throw new BadRequestException(
-                        "No exchange rate is set for " + code + ". Ask HR/Finance to add it "
-                        + "in the currency table before claiming in this currency.");
+                if (currency == null) {
+                    throw noRate(code);
                 }
+                // Prefer the receipt month's rate, fall back to the header rate, and block
+                // only when neither resolves to a positive rate.
                 return resolveRate(currency, rateDate).map(rate -> {
+                    if (rate == null || rate.signum() <= 0) {
+                        throw noRate(code);
+                    }
                     // base = original ÷ rate (1 base = rate foreign). Round to 2 dp in one step.
                     BigDecimal baseAmount = originalAmount.divide(rate, 2, RoundingMode.HALF_UP);
                     return new Converted(currency.getCurrency(), baseAmount, rate);
@@ -88,7 +125,16 @@ public class CurrencyService {
         });
     }
 
-    /** Month rate for {@code rateDate} if entered, else the header rate. Never null. */
+    private static BadRequestException noRate(String code) {
+        return new BadRequestException(
+            "No exchange rate is set for " + code + ". Ask HR/Finance to add it "
+            + "in the currency table before claiming in this currency.");
+    }
+
+    /**
+     * Month rate for {@code rateDate} if entered (positive), else the header rate — which
+     * may itself be null or zero, in which case the caller blocks the save.
+     */
     private Uni<BigDecimal> resolveRate(Currency currency, LocalDate rateDate) {
         BigDecimal headerRate = currency.getExchangeRate();
         int month = rateDate.getMonthValue();

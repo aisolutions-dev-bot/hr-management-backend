@@ -11,6 +11,7 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -42,12 +43,17 @@ public class ClaimConfigResource {
     @GET
     public Uni<Response> getConfig() {
         return systemParameterService.loadBaseCurrency().flatMap(base ->
-            currencyService.listCurrencies().map(currencies -> {
+            currencyService.listCurrenciesWithRates().map(currencies -> {
+                // HashMap (not Map.of) so a null header rate serialises as null instead of throwing.
                 List<Map<String, Object>> currencyList = currencies.stream()
-                        .map(c -> Map.<String, Object>of(
-                                "code", c.getCurrency(),
-                                "description", c.getCurrencyDesc() != null ? c.getCurrencyDesc() : c.getCurrency(),
-                                "rate", c.getExchangeRate()))
+                        .map(c -> {
+                            Map<String, Object> m = new HashMap<>();
+                            m.put("code", c.code());
+                            m.put("description", c.description());
+                            m.put("rate", c.headerRate());
+                            m.put("months", c.months());
+                            return m;
+                        })
                         .toList();
                 return Response.ok(Map.of(
                         "baseCurrency", base,

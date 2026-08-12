@@ -144,6 +144,7 @@ public class StaffClaimDetailService {
         e.setReceiptAmount(originalAmount);
         e.setClaimAmount(conv.baseAmount());
         e.setCurrency(StringNormalizer.truncate(conv.currencyCode(), LEN_CURRENCY));
+        e.setDetectedCurrency(StringNormalizer.truncate(dto.getDetectedCurrency(), LEN_CURRENCY));
         e.setExchangeRate(conv.rateUsed());
     }
 
@@ -224,6 +225,7 @@ public class StaffClaimDetailService {
         e.setReceiptAmount(originalAmount);
         e.setClaimAmount(conv.baseAmount());
         e.setCurrency(StringNormalizer.truncate(conv.currencyCode(), LEN_CURRENCY));
+        e.setDetectedCurrency(StringNormalizer.truncate(dto.getDetectedCurrency(), LEN_CURRENCY));
         e.setExchangeRate(conv.rateUsed());
 
         // Link to the claim header + initial itemised-approval status
@@ -257,6 +259,7 @@ public class StaffClaimDetailService {
         dto.setReceiptAmount(e.getReceiptAmount());
         dto.setClaimAmount(e.getClaimAmount());
         dto.setCurrency(e.getCurrency());
+        dto.setDetectedCurrency(e.getDetectedCurrency());
         dto.setExchangeRate(e.getExchangeRate());
         dto.setStatus(e.getStatus());
         dto.setApprovedBy(e.getApprovedBy());

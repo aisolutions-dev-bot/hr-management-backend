@@ -31,6 +31,8 @@ public class StaffClaimDetailDTO {
     private BigDecimal receiptAmount;
     private BigDecimal claimAmount;
     private String currency;
+    /** Currency the AI/OCR read off the receipt (traceability). */
+    private String detectedCurrency;
     private BigDecimal exchangeRate;
 
     // Itemised approval (per-line)
