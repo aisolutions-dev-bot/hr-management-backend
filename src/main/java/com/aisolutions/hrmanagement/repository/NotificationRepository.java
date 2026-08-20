@@ -16,12 +16,17 @@ import java.util.List;
 @WithSession
 public class NotificationRepository implements PanacheRepositoryBase<Notification, Long> {
 
+    // Staff-facing notification types shown in the HRMS bell: claim outcomes + leave
+    // (both the applicant's outcome and the approver's "please review", since both parties
+    // are staff using this portal).
+    private static final String STAFF_TYPES = "('Staff-Claims', 'Staff-Leaves')";
+
     /** A staff member's staff-facing notifications for one module, newest first. */
     public Uni<List<Notification>> findForStaff(String staffId, String moduleId) {
         return getSession().flatMap(session ->
             session.createQuery(
                 "FROM Notification WHERE notifyStaff = :staffId AND moduleId = :moduleId "
-                    + "AND notificationType = 'Staff-Claims' "
+                    + "AND notificationType IN " + STAFF_TYPES + " "
                     + "ORDER BY entryDate DESC, uniqId DESC",
                 Notification.class)
                 .setParameter("staffId", staffId)
@@ -34,7 +39,7 @@ public class NotificationRepository implements PanacheRepositoryBase<Notificatio
         return getSession().flatMap(session ->
             session.createQuery(
                 "SELECT COUNT(n) FROM Notification n WHERE n.notifyStaff = :staffId "
-                    + "AND n.moduleId = :moduleId AND n.notificationType = 'Staff-Claims' "
+                    + "AND n.moduleId = :moduleId AND n.notificationType IN " + STAFF_TYPES + " "
                     + "AND (n.readStatus IS NULL OR n.readStatus <> 'Read')",
                 Long.class)
                 .setParameter("staffId", staffId)
@@ -79,7 +84,7 @@ public class NotificationRepository implements PanacheRepositoryBase<Notificatio
                 session.createQuery(
                     "UPDATE Notification SET readStatus = 'Read', lastEditStaff = :staff, "
                         + "lastEditDate = :now WHERE LOWER(notifyStaff) = LOWER(:staff) "
-                        + "AND moduleId = :moduleId AND notificationType = 'Staff-Claims' "
+                        + "AND moduleId = :moduleId AND notificationType IN " + STAFF_TYPES + " "
                         + "AND (readStatus IS NULL OR readStatus <> 'Read')")
                     .setParameter("staff", staffId)
                     .setParameter("moduleId", moduleId)

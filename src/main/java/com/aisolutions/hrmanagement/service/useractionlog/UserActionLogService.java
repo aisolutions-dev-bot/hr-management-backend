@@ -12,9 +12,10 @@ public class UserActionLogService {
   @Inject
   UserActionLogRepository auditLogRepository;
 
-  /** m07UserActionLog.Module values for HR Management claim actions. */
+  /** m07UserActionLog.Module values for HR Management actions. */
   public static class Module {
     public static final String STAFF_CLAIM = "STAFF-CLAIM";
+    public static final String STAFF_LEAVE = "STAFF-LEAVE";
   }
 
   /** m07UserActionLog.Action values. */
@@ -23,6 +24,8 @@ public class UserActionLogService {
     public static final String EDIT   = "Edit";
     public static final String SUBMIT = "Submit Claim";
     public static final String VOID   = "Void";
+    public static final String APPLY_LEAVE  = "Apply Leave";
+    public static final String CANCEL_LEAVE = "Cancel Leave";
   }
 
   /** Log an action with device info; never fails the caller's operation. */
