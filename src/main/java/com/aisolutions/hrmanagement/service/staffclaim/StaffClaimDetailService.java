@@ -7,9 +7,9 @@ import com.aisolutions.hrmanagement.service.CurrencyService;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
 import com.aisolutions.hrmanagement.service.attachment.AttachmentService;
 import com.aisolutions.hrmanagement.util.StringNormalizer;
+import com.aisolutions.shared.tenancy.CompanyPoolManager;
 import com.aisolutions.shared.util.DateUtil;
 
-import io.quarkus.hibernate.reactive.panache.Panache;
 import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -25,7 +25,7 @@ import java.util.List;
  *
  * Saving flow:
  *   1. Validate + truncate fields to fit m18StaffClaimsDet VARCHAR(25) constraints
- *   2. Persist claim record → obtain generated UniqId
+ *   2. Persist claim record via CompanyPoolManager-pooled transaction
  *   3. If a photo was provided, upload it via AttachmentService with
  *      moduleType="CLAIM" and referenceCode={claim.UniqId}.
  *      AttachmentService internally uses FTPStorageService for the actual
@@ -53,6 +53,7 @@ public class StaffClaimDetailService {
     @Inject AttachmentService attachmentService;
     @Inject CurrentUserService currentUserService;
     @Inject CurrencyService currencyService;
+    @Inject CompanyPoolManager companyPoolManager;
 
     // ─────────────────────────────────────────────────────────
     //  CREATE
@@ -83,9 +84,10 @@ public class StaffClaimDetailService {
                 return currencyService.toBase(originalAmount, dto.getCurrency(), resolveRateDate(dto))
                     .flatMap(conv ->
                     // 1. Persist the claim (in transaction)
-                    Panache.withTransaction(() ->
-                        claimRepo.save(buildEntity(dto, staffId, originalAmount, conv))
-                    )
+                    companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+                        .flatMap(pool -> pool.withTransaction(tx ->
+                            claimRepo.save(tx, buildEntity(dto, staffId, originalAmount, conv))
+                        ))
                     // 2. Upload photo to FTP (separate call — AttachmentService runs its own transaction)
                     .flatMap(saved -> {
                         if (photoData == null || photoData.length == 0) {
@@ -153,13 +155,15 @@ public class StaffClaimDetailService {
     // ─────────────────────────────────────────────────────────
 
     public Uni<StaffClaimDetailDTO> getById(Long id) {
-        return claimRepo.findById(id)
-            .map(e -> e == null ? null : toDto(e, null, null));
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            claimRepo.findById(pool, id)
+                .map(e -> e == null ? null : toDto(e, null, null)));
     }
 
     public Uni<List<StaffClaimDetailDTO>> listByStaff(String staffId) {
-        return claimRepo.findByStaff(staffId)
-            .map(list -> list.stream().map(e -> toDto(e, null, null)).toList());
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            claimRepo.findByStaff(pool, staffId)
+                .map(list -> list.stream().map(e -> toDto(e, null, null)).toList()));
     }
 
     public Uni<List<StaffClaimDetailDTO>> listCurrentMonth(String staffId) {
@@ -167,8 +171,9 @@ public class StaffClaimDetailService {
         YearMonth ym = YearMonth.from(DateUtil.nowSGT());
         LocalDateTime from = ym.atDay(1).atStartOfDay();
         LocalDateTime to = ym.plusMonths(1).atDay(1).atStartOfDay();
-        return claimRepo.findByStaffAndDateRange(staffId, from, to)
-            .map(list -> list.stream().map(e -> toDto(e, null, null)).toList());
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            claimRepo.findByStaffAndDateRange(pool, staffId, from, to)
+                .map(list -> list.stream().map(e -> toDto(e, null, null)).toList()));
     }
 
     // ─────────────────────────────────────────────────────────

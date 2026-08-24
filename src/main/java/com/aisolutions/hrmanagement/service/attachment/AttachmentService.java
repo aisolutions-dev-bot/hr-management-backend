@@ -5,8 +5,8 @@ import com.aisolutions.hrmanagement.entity.Attachment;
 import com.aisolutions.hrmanagement.repository.AttachmentRepository;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
 import com.aisolutions.hrmanagement.service.SystemParameterService;
+import com.aisolutions.shared.tenancy.CompanyPoolManager;
 
-import io.quarkus.hibernate.reactive.panache.Panache;
 import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -28,6 +28,9 @@ public class AttachmentService {
     @Inject
     FTPStorageService ftpStorageService;
 
+    @Inject
+    CompanyPoolManager companyPoolManager;
+
     private static final List<String> ALLOWED_EXTENSIONS = List.of(
         ".pdf", ".doc", ".docx", ".xls", ".xlsx",
         ".jpg", ".jpeg", ".png", ".gif", ".txt"
@@ -40,14 +43,17 @@ public class AttachmentService {
             return Uni.createFrom().failure(new IllegalArgumentException("Module type is required"));
         if (referenceCode == null || referenceCode.isBlank())
             return Uni.createFrom().failure(new IllegalArgumentException("Reference code is required"));
-        return attachmentRepository.findByModuleAndReference(
-            moduleType.toUpperCase(),
-            referenceCode.toUpperCase()
-        );
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            attachmentRepository.findByModuleAndReference(
+                pool,
+                moduleType.toUpperCase(),
+                referenceCode.toUpperCase()
+            ));
     }
 
     public Uni<Attachment> getAttachmentById(Long uniqId) {
-        return attachmentRepository.findByIdWithoutData(uniqId);
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            attachmentRepository.findByIdWithoutData(pool, uniqId));
     }
 
     /**
@@ -59,35 +65,37 @@ public class AttachmentService {
         if (uniqId == null)
             return Uni.createFrom().failure(new IllegalArgumentException("Attachment ID is required"));
 
-        return attachmentRepository.findByIdWithoutData(uniqId)
-            .flatMap(attachment -> {
-                if (attachment == null) {
-                    return Uni.createFrom().failure(
-                        new RuntimeException("Attachment not found: " + uniqId));
-                }
-                String storageType = attachment.getStorageType();
-
-                if ("FTP".equalsIgnoreCase(storageType)) {
-                    String filePath = attachment.getFilePath();
-                    if (filePath == null || filePath.isBlank()) {
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            attachmentRepository.findByIdWithoutData(pool, uniqId)
+                .flatMap(attachment -> {
+                    if (attachment == null) {
                         return Uni.createFrom().failure(
-                            new RuntimeException("File path not found for attachment: " + uniqId));
+                            new RuntimeException("Attachment not found: " + uniqId));
                     }
-                    return systemParameterService.loadFtpConfig()
-                        .flatMap(config -> ftpStorageService.downloadFile(filePath, config));
-                }
-                if ("LOCAL".equalsIgnoreCase(storageType)) {
-                    return attachmentRepository.loadLocalFileData(uniqId)
-                        .onItem().ifNull().failWith(() ->
-                            new RuntimeException("File data not found in database: " + uniqId));
-                }
-                return Uni.createFrom().failure(
-                    new RuntimeException("Unknown storage type: " + storageType));
-            });
+                    String storageType = attachment.getStorageType();
+
+                    if ("FTP".equalsIgnoreCase(storageType)) {
+                        String filePath = attachment.getFilePath();
+                        if (filePath == null || filePath.isBlank()) {
+                            return Uni.createFrom().failure(
+                                new RuntimeException("File path not found for attachment: " + uniqId));
+                        }
+                        return systemParameterService.loadFtpConfig()
+                            .flatMap(config -> ftpStorageService.downloadFile(filePath, config));
+                    }
+                    if ("LOCAL".equalsIgnoreCase(storageType)) {
+                        return attachmentRepository.loadLocalFileData(pool, uniqId)
+                            .onItem().ifNull().failWith(() ->
+                                new RuntimeException("File data not found in database: " + uniqId));
+                    }
+                    return Uni.createFrom().failure(
+                        new RuntimeException("Unknown storage type: " + storageType));
+                }));
     }
 
     public Uni<Attachment> getAttachmentForDownload(Long uniqId) {
-        return attachmentRepository.findByIdWithoutData(uniqId);
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            attachmentRepository.findByIdWithoutData(pool, uniqId));
     }
 
     public Uni<AttachmentDTO> uploadFile(
@@ -114,17 +122,19 @@ public class AttachmentService {
                         originalName,
                         config))
                     .flatMap(remotePath ->
-                        Panache.withTransaction(() ->
-                            attachmentRepository.persistMetadata(
-                                moduleType,
-                                referenceCode,
-                                originalName,
-                                contentType,
-                                (long) fileData.length,
-                                remotePath,
-                                currentUser.getStaffId()
-                            )
-                        )
+                        companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+                            .flatMap(pool -> pool.withTransaction(tx ->
+                                attachmentRepository.persistMetadata(
+                                    tx,
+                                    moduleType,
+                                    referenceCode,
+                                    originalName,
+                                    contentType,
+                                    (long) fileData.length,
+                                    remotePath,
+                                    currentUser.getStaffId()
+                                )
+                            ))
                     )
             )
             .onItem().transform(this::mapEntityToDTO);
@@ -159,23 +169,24 @@ public class AttachmentService {
         if (uniqId == null)
             return Uni.createFrom().failure(new IllegalArgumentException("Attachment ID is required"));
 
-        return attachmentRepository.findByIdWithoutData(uniqId)
-            .flatMap(attachment -> {
-                if (attachment == null) {
-                    return Uni.createFrom().item(false);
-                }
-                String storageType = attachment.getStorageType();
-                String filePath = attachment.getFilePath();
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            attachmentRepository.findByIdWithoutData(pool, uniqId)
+                .flatMap(attachment -> {
+                    if (attachment == null) {
+                        return Uni.createFrom().item(false);
+                    }
+                    String storageType = attachment.getStorageType();
+                    String filePath = attachment.getFilePath();
 
-                Uni<Boolean> deleteFromStorage =
-                    ("FTP".equalsIgnoreCase(storageType) && filePath != null && !filePath.isBlank())
-                        ? systemParameterService.loadFtpConfig()
-                            .flatMap(config -> ftpStorageService.deleteFile(filePath, config))
-                        : Uni.createFrom().item(true);
+                    Uni<Boolean> deleteFromStorage =
+                        ("FTP".equalsIgnoreCase(storageType) && filePath != null && !filePath.isBlank())
+                            ? systemParameterService.loadFtpConfig()
+                                .flatMap(config -> ftpStorageService.deleteFile(filePath, config))
+                            : Uni.createFrom().item(true);
 
-                return deleteFromStorage.flatMap(ignored ->
-                    Panache.withTransaction(() -> attachmentRepository.deleteRow(uniqId)));
-            });
+                    return deleteFromStorage.flatMap(ignored ->
+                        pool.withTransaction(tx -> attachmentRepository.deleteRow(tx, uniqId)));
+                }));
     }
 
     private String getFileExtension(String filename) {

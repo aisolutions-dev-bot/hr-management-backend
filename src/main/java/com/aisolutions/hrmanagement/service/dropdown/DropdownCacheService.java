@@ -2,6 +2,7 @@ package com.aisolutions.hrmanagement.service.dropdown;
 
 import com.aisolutions.hrmanagement.enums.DropdownType;
 import com.aisolutions.hrmanagement.repository.DropdownRepository;
+import com.aisolutions.shared.tenancy.CompanyPoolManager;
 import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -16,6 +17,12 @@ public class DropdownCacheService {
     
   @Inject
   DropdownRepository repository;
+
+  @Inject
+  CompanyPoolManager companyPoolManager;
+
+  @Inject
+  com.aisolutions.hrmanagement.service.CurrentUserService currentUserService;
   
   // Cache: loaded once and reused
   private volatile Map<String, List<?>> cache = new HashMap<>();
@@ -24,27 +31,23 @@ public class DropdownCacheService {
 
   /**
    * Get all dropdowns from cache (loads LAZILY on first request)
-   * Sequential loading to avoid connection pool exhaustion
    */
   public Uni<Map<String, List<?>>> getCachedDropdowns() {
-      // If cache is already initialized, return it immediately
       if (isFullyLoaded()) {
           return Uni.createFrom().item(cache);
       }
 
-      // If loading is in progress, return the same Uni to avoid duplicate loads
       if (loadingUni != null) {
           return loadingUni;
       }
 
       System.out.println("[ProjectMgmt] Loading dropdowns... (sequential)");
 
-      // Create the loading Uni and cache it to prevent duplicate loads
-      loadingUni = repository.findAllProjects()
+      loadingUni = companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+        .flatMap(pool -> repository.findAllProjects(pool))
         .onItem().invoke(r -> {
              cache.put(DropdownType.PROJECTS.getKey(), r);
             loadedKeys.add(DropdownType.PROJECTS.getKey());
-            //System.out.println("Cached: " + DropdownType.PROJECTS.getKey() + " (" + r.size() + " items)");
         })
         .onItem().invoke(() -> {
             loadingUni = null; 
@@ -54,7 +57,7 @@ public class DropdownCacheService {
         .onFailure().invoke(e -> {
             System.err.println("Error caching dropdowns: " + e.getMessage());
             e.printStackTrace();
-            loadingUni = null;  // Clear on failure so retry can happen
+            loadingUni = null;
         });
 
       return loadingUni;
@@ -64,9 +67,6 @@ public class DropdownCacheService {
     return  loadedKeys.contains(DropdownType.PROJECTS.getKey());
   }
 
-  /**
-   * Clear cache (call this if data changes)
-   */
   public void clearCache() {
       cache.clear();
       loadedKeys.clear();
@@ -74,9 +74,6 @@ public class DropdownCacheService {
       System.out.println("[ProjectMgmt] Dropdown cache cleared completely");
   }
 
-  /**
-   * Clear specific cache entries by key
-   */
   public void clearCacheFor(DropdownType... types) {
       for (DropdownType type : types) {
           cache.remove(type.getKey());

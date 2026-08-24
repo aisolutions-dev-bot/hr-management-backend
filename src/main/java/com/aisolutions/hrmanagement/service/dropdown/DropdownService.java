@@ -1,8 +1,9 @@
 package com.aisolutions.hrmanagement.service.dropdown;
 
-import com.aisolutions.hrmanagement.repository.DropdownRepository;
 import com.aisolutions.hrmanagement.enums.DropdownType;
+import com.aisolutions.hrmanagement.repository.DropdownRepository;
 import com.aisolutions.hrmanagement.dto.DropdownOptionDTO;
+import com.aisolutions.shared.tenancy.CompanyPoolManager;
 
 import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -21,22 +22,27 @@ public class DropdownService {
   @Inject
   DropdownCacheService cacheService;
 
+  @Inject
+  CompanyPoolManager companyPoolManager;
+
+  @Inject
+  com.aisolutions.hrmanagement.service.CurrentUserService currentUserService;
+
   /**
    * Get dropdown options by type
    */
   public Uni<List<DropdownOptionDTO>> getDropdown(DropdownType type) {
       return switch (type) {
-        case PROJECTS -> repository.findAllProjects();
+        case PROJECTS -> companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+            .flatMap(pool -> repository.findAllProjects(pool));
         default -> throw new IllegalArgumentException("Unknown dropdown type: " + type);
       };
   }
 
   /**
    * Get multiple dropdowns by type keys
-   * @param typeKeys - List of keys: "staff", "departments", etc.
    */
   public Uni<Map<String, List<DropdownOptionDTO>>> getDropdownsByTypeKeys(List<String> typeKeys) {
-      // Always use cached version
       return cacheService.getCachedDropdowns()
           .onItem().transform(allDropdowns -> {
               Map<String, List<DropdownOptionDTO>> result = new HashMap<>();
@@ -56,18 +62,11 @@ public class DropdownService {
    * Get Open Projects for dropdown
    */
   public Uni<List<DropdownOptionDTO>> getOpenProjects() {
-      return repository.findOpenProjects();
+      return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+          .flatMap(pool -> repository.findOpenProjects(pool));
   }
 
   public void clearDropdownCache() {
       cacheService.clearCache();
   }
-
-  // public Uni<List<DropdownOptionDTO>> getProjects() {
-  //     return dropdownRepository.findAllProjects();
-  // }
-
-  // public Uni<List<DropdownOptionDTO>> getCurrencies() {
-  //     return dropdownRepository.findAllCurrencies();
-  // }
 }

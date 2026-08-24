@@ -30,6 +30,11 @@ dependencies {
     implementation("io.quarkus:quarkus-hibernate-reactive-panache")
     implementation("io.quarkus:quarkus-reactive-mysql-client")
     implementation("io.quarkus:quarkus-vertx")
+    // JWT verification against org-api's published JWKS (handles key fetch, caching and
+    // rotation; GraalVM native safe) — required by IdentityClaimsExtractor
+    implementation("io.quarkus:quarkus-smallrye-jwt")
+    // CompanyDbClient's companyId -> dbName lookup cache
+    implementation("io.quarkus:quarkus-cache")
     // Kafka messaging + jackson serializer
     implementation("io.quarkus:quarkus-messaging-kafka")
     implementation("io.quarkus:quarkus-jackson")
@@ -41,7 +46,7 @@ dependencies {
     testImplementation("io.rest-assured:rest-assured")
 
     // MavenLocal
-    implementation("com.aisolutions:ai-solutions-java-shared:0.0.5")
+    implementation("com.aisolutions:ai-solutions-java-shared:0.1.1")
 
     // Google API Client Libraries
     implementation("com.google.api-client:google-api-client:2.8.0")
@@ -63,7 +68,7 @@ version = "0.0.1"
 
 java {
     toolchain {
-        languageVersion.set(JavaLanguageVersion.of(21))
+        languageVersion.set(JavaLanguageVersion.of(25))
     }
 }
 

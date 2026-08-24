@@ -2,6 +2,7 @@ package com.aisolutions.hrmanagement.service;
 
 import com.aisolutions.hrmanagement.repository.SystemParameterRepository;
 import com.aisolutions.hrmanagement.service.attachment.FtpConfig;
+import com.aisolutions.shared.tenancy.CompanyPoolManager;
 
 import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -13,32 +14,13 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Reads configuration from m07SystemParameters instead of application.properties,
- * so values can be changed in the DB without a redeploy (the HR Railway deployment
- * is read-only for env vars).
- *
- * Required parameters:
- *   ATTACHMENT-MODE     — must be "FTP" (case-insensitive)
- *   ATTACHMENT-MAIN-URL — base URL/path on FTP server (e.g. /<attachment-base>)
- *   FTP-HOST            — FTP server hostname
- *   FTP-USERNAME        — FTP login user
- *   FTP-PASSWORD        — FTP login password
- *   CURRENCY-BASE       — the currency every claim amount is recorded in (e.g. SGD)
- * Optional:
- *   ATTACHMENT-PATH-HR  — module folder for HR files (defaults to "hr-attachments"
- *                          when absent; mirrors jobtasks-attachments convention)
+ * Reads configuration from m07SystemParameters instead of application.properties.
  */
 @ApplicationScoped
 public class SystemParameterService {
 
     private static final String DEFAULT_HR_FOLDER = "hr-attachments";
 
-    /**
-     * The authoritative base-currency parameter. A second, undocumented
-     * SYSTEM-BASE-CURRENCY row also exists in m07SystemParameters with the same
-     * value; CURRENCY-BASE is the one this system reads. Do not add a fallback to
-     * the other — two live sources will drift.
-     */
     public static final String PARAM_BASE_CURRENCY = "CURRENCY-BASE";
 
     private static final List<String> FTP_PARAMS = List.of(
@@ -53,6 +35,12 @@ public class SystemParameterService {
     @Inject
     SystemParameterRepository systemParameterRepository;
 
+    @Inject
+    CompanyPoolManager companyPoolManager;
+
+    @Inject
+    CurrentUserService currentUserService;
+
     private static final Duration CACHE_TTL = Duration.ofMinutes(5);
 
     private volatile FtpConfig cachedFtpConfig;
@@ -63,13 +51,13 @@ public class SystemParameterService {
 
     /**
      * Load FTP configuration from m07SystemParameters.
-     * Cached for 5 minutes — DB changes take effect within 5 minutes, no redeploy needed.
      */
     public Uni<FtpConfig> loadFtpConfig() {
         if (cachedFtpConfig != null && Instant.now().isBefore(cacheExpiry)) {
             return Uni.createFrom().item(cachedFtpConfig);
         }
-        return systemParameterRepository.getParameterMap(FTP_PARAMS)
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+            .flatMap(pool -> systemParameterRepository.getParameterMap(pool, FTP_PARAMS))
             .map(params -> {
                 String mode = params.get("ATTACHMENT-MODE");
                 if (mode == null || mode.isBlank()) {
@@ -105,17 +93,13 @@ public class SystemParameterService {
 
     /**
      * The currency every claim amount is recorded in, from CURRENCY-BASE.
-     * Cached for 5 minutes, like the FTP config.
-     *
-     * Claim amounts carry no currency of their own — the value is meaningless
-     * without knowing which currency it denominates, so a missing parameter is a
-     * configuration error rather than something to guess a default for.
      */
     public Uni<String> loadBaseCurrency() {
         if (cachedBaseCurrency != null && Instant.now().isBefore(baseCurrencyExpiry)) {
             return Uni.createFrom().item(cachedBaseCurrency);
         }
-        return systemParameterRepository.getParameterMap(List.of(PARAM_BASE_CURRENCY))
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+            .flatMap(pool -> systemParameterRepository.getParameterMap(pool, List.of(PARAM_BASE_CURRENCY)))
             .map(params -> {
                 String currency = require(params, PARAM_BASE_CURRENCY);
                 cachedBaseCurrency = currency;
@@ -132,12 +116,10 @@ public class SystemParameterService {
 
     /**
      * A single parameter's value, or null when it is absent from m07SystemParameters.
-     * Not cached — used for infrequent, non-hot-path lookups (e.g. the claim-submit
-     * notification recipient). A missing parameter is a soft miss, not an error, so
-     * the caller can degrade gracefully rather than fail the underlying action.
      */
     public Uni<String> loadParameter(String name) {
-        return systemParameterRepository.getParameterMap(List.of(name))
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+            .flatMap(pool -> systemParameterRepository.getParameterMap(pool, List.of(name)))
             .map(params -> params.get(name));
     }
 

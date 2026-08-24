@@ -1,73 +1,82 @@
 package com.aisolutions.hrmanagement.repository;
 
+import com.aisolutions.hrmanagement.dto.DropdownOptionDTO;
+
+import io.smallrye.mutiny.Uni;
+import io.vertx.mutiny.sqlclient.Row;
+import io.vertx.mutiny.sqlclient.SqlClient;
+import lombok.extern.slf4j.Slf4j;
+
 import java.util.ArrayList;
 import java.util.List;
 
-import org.hibernate.reactive.mutiny.Mutiny;
-
-import com.aisolutions.hrmanagement.dto.DropdownOptionDTO;
-import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
 
 @ApplicationScoped
+@Slf4j
 public class DropdownRepository {
-  @Inject
-  Mutiny.SessionFactory sessionFactory;
 
-  // ============================================================
-  // PROJECT QUERIES
-  // ============================================================
+    // ============================================================
+    // PROJECT QUERIES
+    // ============================================================
 
-  public Uni<List<DropdownOptionDTO>> findAllProjects() {
-    return sessionFactory.withSession(session -> session.createQuery(
-      "SELECT DISTINCT new com.aisolutions.hrmanagement.dto.DropdownOptionDTO(" +
-          "p.projectCode, p.projectName) " +
-          "FROM Project p " +
-          "ORDER BY p.projectCode",
-      DropdownOptionDTO.class)
-      .getResultList())
-      .onFailure().invoke(e -> {
-        System.err.println("Error fetching projects: " + e.getMessage());
-        e.printStackTrace();
-      })
-      .onFailure().recoverWithItem(e -> {
-        return new ArrayList<>();
-      });
-  }
+    public Uni<List<DropdownOptionDTO>> findAllProjects(SqlClient client) {
+        return client.preparedQuery(
+                "SELECT DISTINCT ProjectCode, ProjectName FROM m01Project ORDER BY ProjectCode")
+            .execute()
+            .map(rows -> {
+                List<DropdownOptionDTO> result = new ArrayList<>();
+                for (Row row : rows) {
+                    result.add(new DropdownOptionDTO(
+                        row.getString("ProjectCode"),
+                        row.getString("ProjectName")));
+                }
+                return result;
+            })
+            .onFailure().invoke(e -> {
+                System.err.println("Error fetching projects: " + e.getMessage());
+                e.printStackTrace();
+            })
+            .onFailure().recoverWithItem(e -> new ArrayList<>());
+    }
 
-  public Uni<List<DropdownOptionDTO>> findOpenProjects() {
-    return sessionFactory.withSession(session -> session.createQuery(
-      "SELECT DISTINCT new com.aisolutions.hrmanagement.dto.DropdownOptionDTO(" +
-        "p.projectCode, p.projectName) " +
-        "FROM Project p " +
-        "WHERE p.status = 'O' " +
-        "ORDER BY p.projectCode",
-      DropdownOptionDTO.class)
-      .getResultList())
-      .onFailure().invoke(e -> {
-        System.err.println("Error fetching open projects: " + e.getMessage());
-        e.printStackTrace();
-      })
-      .onFailure().recoverWithItem(e -> {
-        return new ArrayList<>();
-      });
-  }
+    public Uni<List<DropdownOptionDTO>> findOpenProjects(SqlClient client) {
+        return client.preparedQuery(
+                "SELECT DISTINCT ProjectCode, ProjectName FROM m01Project WHERE Status = 'O' ORDER BY ProjectCode")
+            .execute()
+            .map(rows -> {
+                List<DropdownOptionDTO> result = new ArrayList<>();
+                for (Row row : rows) {
+                    result.add(new DropdownOptionDTO(
+                        row.getString("ProjectCode"),
+                        row.getString("ProjectName")));
+                }
+                return result;
+            })
+            .onFailure().invoke(e -> {
+                System.err.println("Error fetching open projects: " + e.getMessage());
+                e.printStackTrace();
+            })
+            .onFailure().recoverWithItem(e -> new ArrayList<>());
+    }
 
-  public Uni<List<DropdownOptionDTO>> findAllCurrencies() {
-    return sessionFactory.withSession(session -> session.createQuery(
-        "SELECT DISTINCT new com.aisolutions.hrmanagement.dto.DropdownOptionDTO(" +
-            "c.currency, c.currencyDescription) " +
-            "FROM Currency c " +
-            "ORDER BY c.currency",
-        DropdownOptionDTO.class)
-        .getResultList())
-        .onFailure().invoke(e -> {
-          System.err.println("Error fetching currencies: " + e.getMessage());
-          e.printStackTrace();
-        })
-        .onFailure().recoverWithItem(e -> {
-          return new ArrayList<>();
-        });
-  }
+    public Uni<List<DropdownOptionDTO>> findAllCurrencies(SqlClient client) {
+        return client.preparedQuery(
+                "SELECT DISTINCT Currency, CurrencyDesc FROM m01Currency ORDER BY Currency")
+            .execute()
+            .map(rows -> {
+                List<DropdownOptionDTO> result = new ArrayList<>();
+                for (Row row : rows) {
+                    result.add(new DropdownOptionDTO(
+                        row.getString("Currency"),
+                        row.getString("CurrencyDesc")));
+                }
+                return result;
+            })
+            .onFailure().invoke(e -> {
+                System.err.println("Error fetching currencies: " + e.getMessage());
+                e.printStackTrace();
+            })
+            .onFailure().recoverWithItem(e -> new ArrayList<>());
+    }
 }

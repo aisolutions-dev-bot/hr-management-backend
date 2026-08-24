@@ -1,0 +1,57 @@
+name: Build & Deploy Preview
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/aisolutions-dev-bot/hr-management-backend
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build native image
+        run: docker build -f Dockerfile.native --build-arg GITHUB_ACTOR=BCIDev25 --build-arg GITHUB_TOKEN=${{ secrets.GHCR_PAT }} -t ${{ env.IMAGE }}:${{ env.IMAGE_TAG }} -t ${{ env.IMAGE }}:latest .
+
+      - name: Push
+        run: |
+          docker push ${{ env.IMAGE }}:${{ env.IMAGE_TAG }}
+          docker push ${{ env.IMAGE }}:latest
+
+  deploy:
+    runs-on: [self-hosted, preview-vps]
+    needs: build
+    permissions:
+      packages: read
+    steps:
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Pull new image
+        run: docker pull ${{ env.IMAGE }}:${{ env.IMAGE_TAG }}
+
+      - name: Deploy on VPS
+        working-directory: /home/ubuntu/deploy/preview
+        run: IMAGE_TAG=${{ env.IMAGE_TAG }} docker compose -f hr-management-backend.preview.yml up -d
+
+      - name: Health check
+        run: |
+          for i in $(seq 1 30); do
+            if timeout 2 bash -c '</dev/tcp/127.0.0.1/8092' 2>/dev/null; then
+              echo "HEALTHY"; exit 0
+            fi
+            sleep 10
+          done
+          IMAGE_TAG=${{ env.IMAGE_TAG }} docker compose -f /home/ubuntu/deploy/preview/hr-management-backend.preview.yml ps
+          exit 1

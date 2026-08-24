@@ -1,0 +1,31 @@
+# Stage 1: Native compile with GraalVM (Mandrel)
+
+FROM quay.io/quarkus/ubi-quarkus-mandrel-builder-image:jdk-25 AS builder
+
+USER root
+
+WORKDIR /app
+
+ARG GITHUB_ACTOR
+ARG GITHUB_TOKEN
+
+COPY gradlew ./gradlew
+COPY gradle/ ./gradle/
+COPY settings.gradle.kts build.gradle.kts gradle.properties ./
+COPY src/ src/
+
+RUN chmod +x ./gradlew && \
+  GITHUB_ACTOR=$GITHUB_ACTOR GITHUB_TOKEN=$GITHUB_TOKEN \
+  ./gradlew build -Dquarkus.package.type=native -x test --no-daemon
+
+# Stage 2: Minimal runtime
+
+FROM quay.io/quarkus/quarkus-distroless-image:2.0
+
+WORKDIR /app
+
+COPY --from=builder /app/build/hr-management-backend-0.0.1-runner /app/application
+
+EXPOSE 8092
+
+ENTRYPOINT ["/app/application"]

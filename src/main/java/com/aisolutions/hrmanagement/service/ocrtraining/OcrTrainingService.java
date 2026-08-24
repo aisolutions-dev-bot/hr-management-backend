@@ -7,9 +7,10 @@ import com.aisolutions.hrmanagement.repository.*;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
 import com.aisolutions.hrmanagement.util.FuzzyMatcher;
 import com.aisolutions.hrmanagement.util.StringNormalizer;
+import com.aisolutions.shared.tenancy.CompanyPoolManager;
 
-import io.quarkus.hibernate.reactive.panache.Panache;
 import io.smallrye.mutiny.Uni;
+import io.vertx.mutiny.sqlclient.SqlClient;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -62,6 +63,7 @@ public class OcrTrainingService {
     @Inject OcrMerchantRuleRepository merchantRuleRepo;
     @Inject OcrGlobalFieldRuleRepository globalRuleRepo;
     @Inject CurrentUserService currentUserService;
+    @Inject CompanyPoolManager companyPoolManager;
 
     // ─────────────────────────────────────────────────────────
     //  RECORD CORRECTION
@@ -75,11 +77,12 @@ public class OcrTrainingService {
         return currentUserService.getCurrentUser()
             .onItem().transformToUni(user -> {
                 String staffId = (user != null) ? user.getStaffId() : null;
-                return Panache.withTransaction(() -> doRecordCorrection(request, staffId));
+                return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+                    .flatMap(pool -> doRecordCorrection(pool, request, staffId));
             });
     }
 
-    private Uni<Void> doRecordCorrection(RecordCorrectionRequestDTO req, String staffId) {
+    private Uni<Void> doRecordCorrection(SqlClient pool, RecordCorrectionRequestDTO req, String staffId) {
         OcrReceiptResultDTO ocr = req.getOcrResult();
         String rawText = ocr.getRawText() != null ? ocr.getRawText() : "";
 
@@ -109,22 +112,22 @@ public class OcrTrainingService {
                         ? req.getCorrectedMerchantName()
                         : (ocr.getMerchantName() != null ? ocr.getMerchantName() : ""));
 
-        return correctionRepo.save(rec)
-            .flatMap(ignore -> learnMerchantAlias(
+        return correctionRepo.save(pool, rec)
+            .flatMap(ignore -> learnMerchantAlias(pool,
                     ocr.getMerchantName(), req.getCorrectedMerchantName(),
                     rec.getMerchantCorrected(), staffId))
-            .flatMap(ignore -> learnFieldKeywords(
+            .flatMap(ignore -> learnFieldKeywords(pool,
                     OcrFieldName.RECEIPT_NUMBER, req.getCorrectedReceiptNumber(),
                     lines, merchantKey, staffId))
-            .flatMap(ignore -> learnDateKeywords(
+            .flatMap(ignore -> learnDateKeywords(pool,
                     req.getCorrectedReceiptDate(), lines, merchantKey, staffId))
-            .flatMap(ignore -> learnAmountKeywords(
+            .flatMap(ignore -> learnAmountKeywords(pool,
                     req.getCorrectedReceiptAmount(), lines, merchantKey, staffId))
             .replaceWithVoid();
     }
 
     private Uni<Void> learnMerchantAlias(
-            String ocrName, String correctName, boolean wasCorrected, String staffId) {
+            SqlClient pool, String ocrName, String correctName, boolean wasCorrected, String staffId) {
 
         if (StringNormalizer.isBlank(correctName)) return Uni.createFrom().voidItem();
 
@@ -132,7 +135,7 @@ public class OcrTrainingService {
                 !StringNormalizer.isBlank(ocrName) ? ocrName : correctName);
         if (pattern.isEmpty()) return Uni.createFrom().voidItem();
 
-        return aliasRepo.findByPatternExact(pattern)
+        return aliasRepo.findByPatternExact(pool, pattern)
             .flatMap(existing -> {
                 if (existing != null) {
                     existing.setCorrectName(correctName);
@@ -140,7 +143,7 @@ public class OcrTrainingService {
                     existing.setConfidence(Math.min(100,
                             existing.getConfidence() + (wasCorrected ? 5 : 10)));
                     existing.setLastUsed(DateUtil.nowSGT());
-                    return aliasRepo.update(existing).replaceWithVoid();
+                    return aliasRepo.update(pool, existing).replaceWithVoid();
                 }
                 OcrMerchantAlias a = new OcrMerchantAlias();
                 a.setOcrPattern(pattern);
@@ -150,12 +153,12 @@ public class OcrTrainingService {
                 a.setLastUsed(DateUtil.nowSGT());
                 a.setEntryStaff(staffId);
                 a.setEntryDate(DateUtil.nowSGT());
-                return aliasRepo.save(a).replaceWithVoid();
+                return aliasRepo.save(pool, a).replaceWithVoid();
             });
     }
 
     private Uni<Void> learnFieldKeywords(
-            OcrFieldName field, String correctedValue,
+            SqlClient pool, OcrFieldName field, String correctedValue,
             List<String> lines, String merchantKey, String staffId) {
 
         if (StringNormalizer.isBlank(correctedValue)) return Uni.createFrom().voidItem();
@@ -167,15 +170,15 @@ public class OcrTrainingService {
 
         Uni<Void> merchantRuleLearn = merchantKey.isEmpty()
                 ? Uni.createFrom().voidItem()
-                : upsertMerchantRuleForField(merchantKey, field, keyword, pattern, staffId);
+                : upsertMerchantRuleForField(pool, merchantKey, field, keyword, pattern, staffId);
 
-        Uni<Void> globalRuleLearn = upsertGlobalRule(field, keyword, pattern, null);
+        Uni<Void> globalRuleLearn = upsertGlobalRule(pool, field, keyword, pattern, null);
 
         return merchantRuleLearn.flatMap(v -> globalRuleLearn);
     }
 
     private Uni<Void> learnDateKeywords(
-            String correctedIsoDate, List<String> lines,
+            SqlClient pool, String correctedIsoDate, List<String> lines,
             String merchantKey, String staffId) {
 
         if (StringNormalizer.isBlank(correctedIsoDate)) return Uni.createFrom().voidItem();
@@ -188,17 +191,17 @@ public class OcrTrainingService {
 
         Uni<Void> merchantRuleLearn = merchantKey.isEmpty()
                 ? Uni.createFrom().voidItem()
-                : upsertMerchantRuleDate(merchantKey, dateKeyword, dateFormat, staffId);
+                : upsertMerchantRuleDate(pool, merchantKey, dateKeyword, dateFormat, staffId);
 
         Uni<Void> globalRuleLearn = (dateKeyword != null)
-                ? upsertGlobalRule(OcrFieldName.RECEIPT_DATE, dateKeyword, null, dateFormat)
+                ? upsertGlobalRule(pool, OcrFieldName.RECEIPT_DATE, dateKeyword, null, dateFormat)
                 : Uni.createFrom().voidItem();
 
         return merchantRuleLearn.flatMap(v -> globalRuleLearn);
     }
 
     private Uni<Void> learnAmountKeywords(
-            BigDecimal correctedAmount, List<String> lines,
+            SqlClient pool, BigDecimal correctedAmount, List<String> lines,
             String merchantKey, String staffId) {
 
         if (correctedAmount == null) return Uni.createFrom().voidItem();
@@ -211,9 +214,9 @@ public class OcrTrainingService {
 
         Uni<Void> merchantRuleLearn = merchantKey.isEmpty()
                 ? Uni.createFrom().voidItem()
-                : upsertMerchantRuleAmount(merchantKey, keyword, staffId);
+                : upsertMerchantRuleAmount(pool, merchantKey, keyword, staffId);
 
-        Uni<Void> globalRuleLearn = upsertGlobalRule(
+        Uni<Void> globalRuleLearn = upsertGlobalRule(pool,
                 OcrFieldName.RECEIPT_AMOUNT, keyword, null, null);
 
         return merchantRuleLearn.flatMap(v -> globalRuleLearn);
@@ -222,10 +225,10 @@ public class OcrTrainingService {
     // ── Upsert helpers ────────────────────────────────────────
 
     private Uni<Void> upsertMerchantRuleForField(
-            String merchantKey, OcrFieldName field,
+            SqlClient pool, String merchantKey, OcrFieldName field,
             String keyword, String pattern, String staffId) {
 
-        return merchantRuleRepo.findByMerchantExact(merchantKey)
+        return merchantRuleRepo.findByMerchantExact(pool, merchantKey)
             .flatMap(existing -> {
                 OcrMerchantRule rule = existing != null ? existing : newMerchantRule(merchantKey, staffId);
                 if (field == OcrFieldName.RECEIPT_NUMBER) {
@@ -236,15 +239,15 @@ public class OcrTrainingService {
                 rule.setConfidence(Math.min(100, rule.getConfidence() + 8));
                 rule.setLastUsed(DateUtil.nowSGT());
                 return existing != null
-                        ? merchantRuleRepo.update(rule).replaceWithVoid()
-                        : merchantRuleRepo.save(rule).replaceWithVoid();
+                        ? merchantRuleRepo.update(pool, rule).replaceWithVoid()
+                        : merchantRuleRepo.save(pool, rule).replaceWithVoid();
             });
     }
 
     private Uni<Void> upsertMerchantRuleDate(
-            String merchantKey, String dateKeyword, String dateFormat, String staffId) {
+            SqlClient pool, String merchantKey, String dateKeyword, String dateFormat, String staffId) {
 
-        return merchantRuleRepo.findByMerchantExact(merchantKey)
+        return merchantRuleRepo.findByMerchantExact(pool, merchantKey)
             .flatMap(existing -> {
                 OcrMerchantRule rule = existing != null ? existing : newMerchantRule(merchantKey, staffId);
                 if (dateKeyword != null) rule.setDateKeyword(dateKeyword);
@@ -253,15 +256,15 @@ public class OcrTrainingService {
                 rule.setConfidence(Math.min(100, rule.getConfidence() + 8));
                 rule.setLastUsed(DateUtil.nowSGT());
                 return existing != null
-                        ? merchantRuleRepo.update(rule).replaceWithVoid()
-                        : merchantRuleRepo.save(rule).replaceWithVoid();
+                        ? merchantRuleRepo.update(pool, rule).replaceWithVoid()
+                        : merchantRuleRepo.save(pool, rule).replaceWithVoid();
             });
     }
 
     private Uni<Void> upsertMerchantRuleAmount(
-            String merchantKey, String keyword, String staffId) {
+            SqlClient pool, String merchantKey, String keyword, String staffId) {
 
-        return merchantRuleRepo.findByMerchantExact(merchantKey)
+        return merchantRuleRepo.findByMerchantExact(pool, merchantKey)
             .flatMap(existing -> {
                 OcrMerchantRule rule = existing != null ? existing : newMerchantRule(merchantKey, staffId);
                 rule.setAmountKeyword(keyword);
@@ -269,8 +272,8 @@ public class OcrTrainingService {
                 rule.setConfidence(Math.min(100, rule.getConfidence() + 8));
                 rule.setLastUsed(DateUtil.nowSGT());
                 return existing != null
-                        ? merchantRuleRepo.update(rule).replaceWithVoid()
-                        : merchantRuleRepo.save(rule).replaceWithVoid();
+                        ? merchantRuleRepo.update(pool, rule).replaceWithVoid()
+                        : merchantRuleRepo.save(pool, rule).replaceWithVoid();
             });
     }
 
@@ -289,14 +292,14 @@ public class OcrTrainingService {
      * Upserts a global rule; recomputes ConfirmedByCount via a distinct-merchant query.
      */
     private Uni<Void> upsertGlobalRule(
-            OcrFieldName field, String keyword, String valuePattern, String dateFormat) {
+            SqlClient pool, OcrFieldName field, String keyword, String valuePattern, String dateFormat) {
 
         if (keyword == null || keyword.isBlank()) return Uni.createFrom().voidItem();
 
         final String fieldName = field.getValue();
 
-        return globalRuleRepo.findByFieldAndKeyword(fieldName, keyword)
-            .flatMap(existing -> correctionRepo.countDistinctMerchantsForKeyword(fieldName, keyword)
+        return globalRuleRepo.findByFieldAndKeyword(pool, fieldName, keyword)
+            .flatMap(existing -> correctionRepo.countDistinctMerchantsForKeyword(pool, fieldName, keyword)
                 .flatMap(distinctMerchants -> {
                     OcrGlobalFieldRule rule = existing != null ? existing : new OcrGlobalFieldRule();
                     boolean isNew = existing == null;
@@ -322,8 +325,8 @@ public class OcrTrainingService {
                     rule.setLastUsed(DateUtil.nowSGT());
 
                     return isNew
-                            ? globalRuleRepo.save(rule).replaceWithVoid()
-                            : globalRuleRepo.update(rule).replaceWithVoid();
+                            ? globalRuleRepo.save(pool, rule).replaceWithVoid()
+                            : globalRuleRepo.update(pool, rule).replaceWithVoid();
                 }));
     }
 
@@ -338,38 +341,39 @@ public class OcrTrainingService {
         OcrReceiptResultDTO result = copy(input);
         List<String> lines = splitLines(result.getRawText());
 
-        return resolveMerchantName(result.getMerchantName(), lines)
-            .flatMap(resolvedName -> {
-                if (resolvedName != null) result.setMerchantName(resolvedName);
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            resolveMerchantName(pool, result.getMerchantName(), lines)
+                .flatMap(resolvedName -> {
+                    if (resolvedName != null) result.setMerchantName(resolvedName);
 
-                String merchantKey = StringNormalizer.normalise(
-                        result.getMerchantName() != null ? result.getMerchantName() : "");
+                    String merchantKey = StringNormalizer.normalise(
+                            result.getMerchantName() != null ? result.getMerchantName() : "");
 
-                return applyMerchantSpecificRules(result, lines, merchantKey)
-                    .flatMap(afterMerchant -> applyGlobalRules(afterMerchant, lines))
-                    .flatMap(this::applyFuzzyFallback);
-            });
+                    return applyMerchantSpecificRules(pool, result, lines, merchantKey)
+                        .flatMap(afterMerchant -> applyGlobalRules(pool, afterMerchant, lines))
+                        .flatMap(this::applyFuzzyFallback);
+                }));
     }
 
-    private Uni<String> resolveMerchantName(String ocrName, List<String> lines) {
+    private Uni<String> resolveMerchantName(io.vertx.mutiny.mysqlclient.MySQLPool pool, String ocrName, List<String> lines) {
         if (!StringNormalizer.isBlank(ocrName)) {
             String norm = StringNormalizer.normalise(ocrName);
-            return aliasRepo.findByPatternExact(norm)
+            return aliasRepo.findByPatternExact(pool, norm)
                 .flatMap(alias -> {
                     if (alias != null && alias.getConfidence() >= MIN_RULE_CONFIDENCE_FOR_APPLY) {
                         alias.setHitCount(alias.getHitCount() + 1);
                         alias.setLastUsed(DateUtil.nowSGT());
-                        return Panache.withTransaction(() -> aliasRepo.update(alias))
+                        return pool.withTransaction(tx -> aliasRepo.update(tx, alias))
                             .map(ignore -> alias.getCorrectName());
                     }
-                    return fuzzyResolveFromLines(lines).map(r -> r != null ? r : ocrName);
+                    return fuzzyResolveFromLines(pool, lines).map(r -> r != null ? r : ocrName);
                 });
         }
-        return fuzzyResolveFromLines(lines);
+        return fuzzyResolveFromLines(pool, lines);
     }
 
-    private Uni<String> fuzzyResolveFromLines(List<String> lines) {
-        return aliasRepo.findAllOrdered().map(allAliases -> {
+    private Uni<String> fuzzyResolveFromLines(SqlClient pool, List<String> lines) {
+        return aliasRepo.findAllOrdered(pool).map(allAliases -> {
             for (String line : lines.subList(0, Math.min(5, lines.size()))) {
                 String normLine = StringNormalizer.normalise(line);
                 for (OcrMerchantAlias alias : allAliases) {
@@ -384,11 +388,11 @@ public class OcrTrainingService {
     }
 
     private Uni<OcrReceiptResultDTO> applyMerchantSpecificRules(
-            OcrReceiptResultDTO result, List<String> lines, String merchantKey) {
+            SqlClient pool, OcrReceiptResultDTO result, List<String> lines, String merchantKey) {
 
         if (merchantKey.isEmpty()) return Uni.createFrom().item(result);
 
-        return merchantRuleRepo.findByMerchantExact(merchantKey)
+        return merchantRuleRepo.findByMerchantExact(pool, merchantKey)
             .map(rule -> {
                 if (rule == null || rule.getConfidence() < MIN_RULE_CONFIDENCE_FOR_APPLY) {
                     return result;
@@ -411,11 +415,11 @@ public class OcrTrainingService {
     }
 
     private Uni<OcrReceiptResultDTO> applyGlobalRules(
-            OcrReceiptResultDTO result, List<String> lines) {
+            SqlClient pool, OcrReceiptResultDTO result, List<String> lines) {
 
         Uni<OcrReceiptResultDTO> step1 = result.getReceiptNumber() != null
             ? Uni.createFrom().item(result)
-            : globalRuleRepo.findByFieldName(OcrFieldName.RECEIPT_NUMBER.getValue())
+            : globalRuleRepo.findByFieldName(pool, OcrFieldName.RECEIPT_NUMBER.getValue())
                 .map(rules -> {
                     for (OcrGlobalFieldRule r : rules) {
                         if (r.getConfidence() < MIN_RULE_CONFIDENCE_FOR_APPLY) continue;
@@ -428,7 +432,7 @@ public class OcrTrainingService {
 
         Uni<OcrReceiptResultDTO> step2 = step1.flatMap(r -> {
             if (r.getReceiptDate() != null) return Uni.createFrom().item(r);
-            return globalRuleRepo.findByFieldName(OcrFieldName.RECEIPT_DATE.getValue())
+            return globalRuleRepo.findByFieldName(pool, OcrFieldName.RECEIPT_DATE.getValue())
                 .map(rules -> {
                     for (OcrGlobalFieldRule rule : rules) {
                         if (rule.getConfidence() < MIN_RULE_CONFIDENCE_FOR_APPLY) continue;
@@ -441,7 +445,7 @@ public class OcrTrainingService {
 
         return step2.flatMap(r -> {
             if (r.getReceiptAmount() != null) return Uni.createFrom().item(r);
-            return globalRuleRepo.findByFieldName(OcrFieldName.RECEIPT_AMOUNT.getValue())
+            return globalRuleRepo.findByFieldName(pool, OcrFieldName.RECEIPT_AMOUNT.getValue())
                 .map(rules -> {
                     for (OcrGlobalFieldRule rule : rules) {
                         if (rule.getConfidence() < MIN_RULE_CONFIDENCE_FOR_APPLY) continue;
@@ -463,31 +467,32 @@ public class OcrTrainingService {
                 substring(result.getRawText(), CORRECTION_TEXT_COMPARE_PREFIX));
         if (rawKey.isEmpty()) return Uni.createFrom().item(result);
 
-        return correctionRepo.findRecentForFuzzyMatch(CORRECTION_FUZZY_POOL_SIZE)
-            .map(recent -> {
-                OcrCorrection best = null;
-                double bestScore = 0;
-                for (OcrCorrection c : recent) {
-                    String k = StringNormalizer.normalise(
-                            substring(c.getRawText(), CORRECTION_TEXT_COMPARE_PREFIX));
-                    double s = FuzzyMatcher.similarity(rawKey, k);
-                    if (s > bestScore && s >= FUZZY_CORRECTION_THRESHOLD) {
-                        bestScore = s;
-                        best = c;
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            correctionRepo.findRecentForFuzzyMatch(pool, CORRECTION_FUZZY_POOL_SIZE)
+                .map(recent -> {
+                    OcrCorrection best = null;
+                    double bestScore = 0;
+                    for (OcrCorrection c : recent) {
+                        String k = StringNormalizer.normalise(
+                                substring(c.getRawText(), CORRECTION_TEXT_COMPARE_PREFIX));
+                        double s = FuzzyMatcher.similarity(rawKey, k);
+                        if (s > bestScore && s >= FUZZY_CORRECTION_THRESHOLD) {
+                            bestScore = s;
+                            best = c;
+                        }
                     }
-                }
-                if (best != null) {
-                    if (result.getMerchantName() == null && best.getCorrectedMerchantName() != null)
-                        result.setMerchantName(best.getCorrectedMerchantName());
-                    if (result.getReceiptNumber() == null && best.getCorrectedReceiptNumber() != null)
-                        result.setReceiptNumber(best.getCorrectedReceiptNumber());
-                    if (result.getReceiptDate() == null && best.getCorrectedReceiptDate() != null)
-                        result.setReceiptDate(best.getCorrectedReceiptDate());
-                    if (result.getReceiptAmount() == null && best.getCorrectedReceiptAmount() != null)
-                        result.setReceiptAmount(best.getCorrectedReceiptAmount());
-                }
-                return result;
-            });
+                    if (best != null) {
+                        if (result.getMerchantName() == null && best.getCorrectedMerchantName() != null)
+                            result.setMerchantName(best.getCorrectedMerchantName());
+                        if (result.getReceiptNumber() == null && best.getCorrectedReceiptNumber() != null)
+                            result.setReceiptNumber(best.getCorrectedReceiptNumber());
+                        if (result.getReceiptDate() == null && best.getCorrectedReceiptDate() != null)
+                            result.setReceiptDate(best.getCorrectedReceiptDate());
+                        if (result.getReceiptAmount() == null && best.getCorrectedReceiptAmount() != null)
+                            result.setReceiptAmount(best.getCorrectedReceiptAmount());
+                    }
+                    return result;
+                }));
     }
 
     // ─────────────────────────────────────────────────────────
@@ -495,15 +500,18 @@ public class OcrTrainingService {
     // ─────────────────────────────────────────────────────────
 
     public Uni<OcrTrainingStatsDTO> getStats() {
-        return correctionRepo.getCorrectionCounts()
-            .flatMap(counts -> aliasRepo.countAll()
-                .flatMap(aliasCount -> merchantRuleRepo.countAll()
-                    .flatMap(ruleCount -> globalRuleRepo.countAll()
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+            .flatMap(pool -> correctionRepo.getCorrectionCounts(pool))
+            .flatMap(counts -> companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> aliasRepo.countAll(pool))
+                .flatMap(aliasCount -> companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+                    .flatMap(pool -> merchantRuleRepo.countAll(pool))
+                    .flatMap(ruleCount -> companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+                        .flatMap(pool -> globalRuleRepo.countAll(pool))
                         .map(globalCount -> {
                             long total = counts[0];
                             long mErr = counts[1], nErr = counts[2], dErr = counts[3], aErr = counts[4];
                             long corrected = Math.max(mErr, Math.max(nErr, Math.max(dErr, aErr)));
-
                             OcrTrainingStatsDTO.FieldAccuracy acc = new OcrTrainingStatsDTO.FieldAccuracy(
                                 total > 0 ? (int) Math.round((total - mErr) * 100.0 / total) : 0,
                                 total > 0 ? (int) Math.round((total - nErr) * 100.0 / total) : 0,
@@ -516,46 +524,55 @@ public class OcrTrainingService {
     }
 
     public Uni<List<OcrMerchantAliasDTO>> listAliases() {
-        return aliasRepo.findAllOrdered().map(list -> list.stream().map(this::toAliasDto).toList());
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            aliasRepo.findAllOrdered(pool).map(list -> list.stream().map(this::toAliasDto).toList()));
     }
 
     public Uni<List<OcrMerchantRuleDTO>> listMerchantRules() {
-        return merchantRuleRepo.findAllOrdered().map(list -> list.stream().map(this::toMerchantRuleDto).toList());
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            merchantRuleRepo.findAllOrdered(pool).map(list -> list.stream().map(this::toMerchantRuleDto).toList()));
     }
 
     public Uni<List<OcrGlobalFieldRuleDTO>> listGlobalRules() {
-        return globalRuleRepo.findAllOrdered().map(list -> list.stream().map(this::toGlobalRuleDto).toList());
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            globalRuleRepo.findAllOrdered(pool).map(list -> list.stream().map(this::toGlobalRuleDto).toList()));
     }
 
     public Uni<List<OcrCorrectionDTO>> listCorrections() {
-        return correctionRepo.findAllOrderedByTimestampDesc()
-                .map(list -> list.stream().map(this::toCorrectionDto).toList());
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            correctionRepo.findAllOrderedByTimestampDesc(pool)
+                .map(list -> list.stream().map(this::toCorrectionDto).toList()));
     }
 
     public Uni<Boolean> deleteAlias(Long id) {
-        return Panache.withTransaction(() -> aliasRepo.deleteByIdSafely(id));
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            pool.withTransaction(tx -> aliasRepo.deleteByIdSafely(tx, id)));
     }
 
     public Uni<Boolean> deleteMerchantRule(Long id) {
-        return Panache.withTransaction(() -> merchantRuleRepo.deleteByIdSafely(id));
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            pool.withTransaction(tx -> merchantRuleRepo.deleteByIdSafely(tx, id)));
     }
 
     public Uni<Boolean> deleteGlobalRule(Long id) {
-        return Panache.withTransaction(() -> globalRuleRepo.deleteByIdSafely(id));
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            pool.withTransaction(tx -> globalRuleRepo.deleteByIdSafely(tx, id)));
     }
 
     public Uni<Boolean> deleteCorrection(Long id) {
-        return Panache.withTransaction(() -> correctionRepo.deleteByIdSafely(id));
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            pool.withTransaction(tx -> correctionRepo.deleteByIdSafely(tx, id)));
     }
 
     public Uni<Void> clearAllTrainingData() {
-        return Panache.withTransaction(() ->
-            correctionRepo.deleteAll()
-                .flatMap(x -> aliasRepo.deleteAll())
-                .flatMap(x -> merchantRuleRepo.deleteAll())
-                .flatMap(x -> globalRuleRepo.deleteAll())
-                .replaceWithVoid()
-        );
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            pool.withTransaction(tx ->
+                correctionRepo.deleteAll(tx)
+                    .flatMap(x -> aliasRepo.deleteAll(tx))
+                    .flatMap(x -> merchantRuleRepo.deleteAll(tx))
+                    .flatMap(x -> globalRuleRepo.deleteAll(tx))
+                    .replaceWithVoid()
+            ));
     }
 
     // ─────────────────────────────────────────────────────────

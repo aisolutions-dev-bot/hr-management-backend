@@ -2,39 +2,56 @@ package com.aisolutions.hrmanagement.repository;
 
 import com.aisolutions.hrmanagement.entity.Currency;
 
-import io.quarkus.hibernate.reactive.panache.PanacheRepositoryBase;
-import io.quarkus.hibernate.reactive.panache.common.WithSession;
 import io.smallrye.mutiny.Uni;
+import io.vertx.mutiny.sqlclient.Row;
+import io.vertx.mutiny.sqlclient.RowSet;
+import io.vertx.mutiny.sqlclient.SqlClient;
+import io.vertx.mutiny.sqlclient.Tuple;
 import jakarta.enterprise.context.ApplicationScoped;
+import lombok.extern.slf4j.Slf4j;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @ApplicationScoped
-@WithSession
-public class CurrencyRepository implements PanacheRepositoryBase<Currency, Long> {
+@Slf4j
+public class CurrencyRepository {
 
     /** All currencies, for the Add Receipt dropdown. */
-    public Uni<List<Currency>> findAllOrdered() {
-        return getSession().flatMap(session ->
-            session.createQuery("FROM Currency ORDER BY currency", Currency.class)
-                .getResultList()
-        );
+    public Uni<List<Currency>> findAllOrdered(SqlClient client) {
+        return client.preparedQuery(
+                "SELECT UniqId, Currency, CurrencyDesc, ExchangeRate FROM m01Currency ORDER BY Currency")
+            .execute()
+            .map(this::toList);
     }
 
     /**
-     * One currency by its code (case-insensitive), or null. Used at save time to
-     * resolve the rate — a missing code means the currency has no rate yet, which
-     * the caller must treat as a blocked save rather than a rate of 1.
+     * One currency by its code (case-insensitive), or null.
      */
-    public Uni<Currency> findByCode(String code) {
+    public Uni<Currency> findByCode(SqlClient client, String code) {
         if (code == null || code.isBlank()) {
             return Uni.createFrom().nullItem();
         }
-        return getSession().flatMap(session ->
-            session.createQuery(
-                    "FROM Currency WHERE upper(currency) = :code", Currency.class)
-                .setParameter("code", code.trim().toUpperCase())
-                .getResultList()
-        ).map(list -> list.isEmpty() ? null : list.get(0));
+        return client.preparedQuery(
+                "SELECT UniqId, Currency, CurrencyDesc, ExchangeRate FROM m01Currency WHERE UPPER(Currency) = ?")
+            .execute(Tuple.tuple().addValue(code.trim().toUpperCase()))
+            .map(rows -> rows.iterator().hasNext() ? toEntity(rows.iterator().next()) : null);
+    }
+
+    private List<Currency> toList(RowSet<Row> rows) {
+        List<Currency> result = new ArrayList<>();
+        for (Row row : rows) {
+            result.add(toEntity(row));
+        }
+        return result;
+    }
+
+    private Currency toEntity(Row row) {
+        Currency c = new Currency();
+        c.setUniqId(row.getLong("UniqId"));
+        c.setCurrency(row.getString("Currency"));
+        c.setCurrencyDesc(row.getString("CurrencyDesc"));
+        c.setExchangeRate(row.getBigDecimal("ExchangeRate"));
+        return c;
     }
 }

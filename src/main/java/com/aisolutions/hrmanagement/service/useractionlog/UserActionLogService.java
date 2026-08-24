@@ -1,6 +1,7 @@
 package com.aisolutions.hrmanagement.service.useractionlog;
 
 import com.aisolutions.hrmanagement.repository.UserActionLogRepository;
+import com.aisolutions.shared.tenancy.CompanyPoolManager;
 
 import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -11,6 +12,9 @@ public class UserActionLogService {
 
   @Inject
   UserActionLogRepository auditLogRepository;
+
+  @Inject
+  CompanyPoolManager companyPoolManager;
 
   /** m07UserActionLog.Module values for HR Management actions. */
   public static class Module {
@@ -28,8 +32,12 @@ public class UserActionLogService {
     public static final String CANCEL_LEAVE = "Cancel Leave";
   }
 
-  /** Log an action with device info; never fails the caller's operation. */
+  /**
+   * Log an action with device info; never fails the caller's operation.
+   * Routes to the correct company database via CompanyPoolManager.
+   */
   public Uni<Void> logAction(
+      String companyId,
       String currentUser,
       String module,
       String referenceNo,
@@ -37,22 +45,24 @@ public class UserActionLogService {
       DeviceInfo deviceInfo,
       String remarks) {
 
-    return auditLogRepository.createLog(
-        currentUser,
-        module,
-        referenceNo,
-        action,
-        deviceInfo != null ? deviceInfo.getDeviceName() : null,
-        deviceInfo != null ? deviceInfo.getDeviceIPAddress() : null,
-        deviceInfo != null ? deviceInfo.getDeviceSerialNo() : null,
-        remarks)
+    return companyPoolManager.poolFor(companyId)
+        .flatMap(pool -> auditLogRepository.createLog(
+            pool,
+            currentUser,
+            module,
+            referenceNo,
+            action,
+            deviceInfo != null ? deviceInfo.getDeviceName() : null,
+            deviceInfo != null ? deviceInfo.getDeviceIPAddress() : null,
+            deviceInfo != null ? deviceInfo.getDeviceSerialNo() : null,
+            remarks))
         .replaceWithVoid()
         .onFailure().recoverWithNull();
   }
 
   /** Log an action without device info. */
-  public Uni<Void> logAction(String currentUser, String module, String referenceNo, String action) {
-    return logAction(currentUser, module, referenceNo, action, null, null);
+  public Uni<Void> logAction(String companyId, String currentUser, String module, String referenceNo, String action) {
+    return logAction(companyId, currentUser, module, referenceNo, action, null, null);
   }
 
   /** Device information holder. */
