@@ -22,7 +22,7 @@ public class DropdownRepository {
 
     public Uni<List<DropdownOptionDTO>> findAllProjects(SqlClient client) {
         return client.preparedQuery(
-                "SELECT DISTINCT ProjectCode, ProjectName FROM m01Project ORDER BY ProjectCode")
+                "SELECT DISTINCT ProjectCode, ProjectName FROM m12Project ORDER BY ProjectCode")
             .execute()
             .map(rows -> {
                 List<DropdownOptionDTO> result = new ArrayList<>();
@@ -42,7 +42,7 @@ public class DropdownRepository {
 
     public Uni<List<DropdownOptionDTO>> findOpenProjects(SqlClient client) {
         return client.preparedQuery(
-                "SELECT DISTINCT ProjectCode, ProjectName FROM m01Project WHERE Status = 'O' ORDER BY ProjectCode")
+                "SELECT DISTINCT ProjectCode, ProjectName FROM m12Project WHERE Status = 'O' ORDER BY ProjectCode")
             .execute()
             .map(rows -> {
                 List<DropdownOptionDTO> result = new ArrayList<>();
