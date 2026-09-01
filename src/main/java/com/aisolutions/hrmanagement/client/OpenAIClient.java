@@ -1,6 +1,7 @@
 package com.aisolutions.hrmanagement.client;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import io.smallrye.mutiny.Uni;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
@@ -43,6 +44,7 @@ public interface OpenAIClient {
     }
 
     /** Plain text message — content is a String */
+    @RegisterForReflection
     @JsonInclude(JsonInclude.Include.NON_NULL)
     class TextMessage {
         public String role;
@@ -55,6 +57,7 @@ public interface OpenAIClient {
     }
 
     /** Vision message — content is a List of ContentPart */
+    @RegisterForReflection
     @JsonInclude(JsonInclude.Include.NON_NULL)
     class VisionMessage {
         public String role;
@@ -66,6 +69,7 @@ public interface OpenAIClient {
         }
     }
 
+    @RegisterForReflection
     @JsonInclude(JsonInclude.Include.NON_NULL)
     class ContentPart {
         public String type;
@@ -89,6 +93,7 @@ public interface OpenAIClient {
         }
     }
 
+    @RegisterForReflection
     @JsonInclude(JsonInclude.Include.NON_NULL)
     class ImageUrl {
         public String url;
