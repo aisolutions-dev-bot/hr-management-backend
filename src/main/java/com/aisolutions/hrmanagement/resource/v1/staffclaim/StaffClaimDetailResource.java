@@ -3,6 +3,7 @@ package com.aisolutions.hrmanagement.resource.v1.staffclaim;
 import com.aisolutions.hrmanagement.dto.OcrReceiptResultDTO;
 import com.aisolutions.hrmanagement.dto.StaffClaimDetailDTO;
 import com.aisolutions.hrmanagement.service.attachment.AttachmentService;
+import com.aisolutions.hrmanagement.service.auth.AccessControlService;
 import com.aisolutions.hrmanagement.service.ocr.ReceiptOcrService;
 import com.aisolutions.hrmanagement.service.staffclaim.StaffClaimDetailService;
 
@@ -34,6 +35,10 @@ public class StaffClaimDetailResource {
     @Inject StaffClaimDetailService claimService;
     @Inject AttachmentService attachmentService;
     @Inject ReceiptOcrService ocrService;
+    @Inject AccessControlService access;
+
+    /** These claim line endpoints belong to the claim sub-module (mod18 a1803). */
+    private static final String CODE = AccessControlService.CLAIM_SUBMISSION;
 
     // ─────────────────────────────────────────────────────────
     //  CREATE (multipart with optional photo)
@@ -45,47 +50,49 @@ public class StaffClaimDetailResource {
             @RestForm("claim") String claimJson,
             @RestForm("photo") FileUpload photo) {
 
-        StaffClaimDetailDTO dto;
-        try {
-            dto = new com.fasterxml.jackson.databind.ObjectMapper()
-                .registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule())
-                .readValue(claimJson, StaffClaimDetailDTO.class);
-        } catch (Exception e) {
-            return Uni.createFrom().item(
-                Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "Invalid claim JSON: " + e.getMessage()))
-                    .build());
-        }
-
-        byte[] photoBytes = null;
-        String photoName = null;
-        String photoType = null;
-        if (photo != null) {
+        return access.gate(CODE, () -> {
+            StaffClaimDetailDTO dto;
             try {
-                photoBytes = Files.readAllBytes(photo.uploadedFile());
-                photoName = photo.fileName();
-                photoType = photo.contentType();
-            } catch (IOException e) {
+                dto = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule())
+                    .readValue(claimJson, StaffClaimDetailDTO.class);
+            } catch (Exception e) {
                 return Uni.createFrom().item(
-                    Response.serverError()
-                        .entity(Map.of("error", "Failed to read photo: " + e.getMessage()))
+                    Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error", "Invalid claim JSON: " + e.getMessage()))
                         .build());
             }
-        }
 
-        return claimService.createClaim(dto, photoBytes, photoName, photoType)
-            .map(saved -> Response.status(Response.Status.CREATED).entity(saved).build())
-            .onFailure(IllegalArgumentException.class).recoverWithItem(err ->
-                Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", err.getMessage()))
-                    .build())
-            .onFailure().recoverWithItem(err -> {
-                System.err.println("Error creating claim: " + err.getMessage());
-                err.printStackTrace();
-                return Response.serverError()
-                    .entity(Map.of("error", err.getMessage()))
-                    .build();
-            });
+            byte[] photoBytes = null;
+            String photoName = null;
+            String photoType = null;
+            if (photo != null) {
+                try {
+                    photoBytes = Files.readAllBytes(photo.uploadedFile());
+                    photoName = photo.fileName();
+                    photoType = photo.contentType();
+                } catch (IOException e) {
+                    return Uni.createFrom().item(
+                        Response.serverError()
+                            .entity(Map.of("error", "Failed to read photo: " + e.getMessage()))
+                            .build());
+                }
+            }
+
+            return claimService.createClaim(dto, photoBytes, photoName, photoType)
+                .map(saved -> Response.status(Response.Status.CREATED).entity(saved).build())
+                .onFailure(IllegalArgumentException.class).recoverWithItem(err ->
+                    Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error", err.getMessage()))
+                        .build())
+                .onFailure().recoverWithItem(err -> {
+                    System.err.println("Error creating claim: " + err.getMessage());
+                    err.printStackTrace();
+                    return Response.serverError()
+                        .entity(Map.of("error", err.getMessage()))
+                        .build();
+                });
+        });
     }
 
     // ─────────────────────────────────────────────────────────
@@ -109,74 +116,80 @@ public class StaffClaimDetailResource {
     public Uni<Response> scanReceipt(
             @RestForm("photo") FileUpload photo) {
 
-        if (photo == null) {
-            return Uni.createFrom().item(
-                Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "Photo is required"))
-                    .build());
-        }
+        return access.gate(CODE, () -> {
+            if (photo == null) {
+                return Uni.createFrom().item(
+                    Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error", "Photo is required"))
+                        .build());
+            }
 
-        byte[] imageBytes;
-        try {
-            imageBytes = Files.readAllBytes(photo.uploadedFile());
-        } catch (IOException e) {
-            return Uni.createFrom().item(
-                Response.serverError()
-                    .entity(Map.of("error", "Failed to read photo: " + e.getMessage()))
-                    .build());
-        }
+            byte[] imageBytes;
+            try {
+                imageBytes = Files.readAllBytes(photo.uploadedFile());
+            } catch (IOException e) {
+                return Uni.createFrom().item(
+                    Response.serverError()
+                        .entity(Map.of("error", "Failed to read photo: " + e.getMessage()))
+                        .build());
+            }
 
-        String mimeType = photo.contentType() != null ? photo.contentType() : "image/jpeg";
+            String mimeType = photo.contentType() != null ? photo.contentType() : "image/jpeg";
 
-        return ocrService.extractFromImage(imageBytes, mimeType)
-            .map(result -> Response.ok(result).build())
-            .onFailure().recoverWithItem(err -> {
-                System.err.println("[ScanReceipt] Error: " + err.getMessage());
-                OcrReceiptResultDTO errResult = new OcrReceiptResultDTO();
-                errResult.setSuccess(false);
-                errResult.setErrorMessage(err.getMessage());
-                return Response.serverError().entity(errResult).build();
-            });
+            return ocrService.extractFromImage(imageBytes, mimeType)
+                .map(result -> Response.ok(result).build())
+                .onFailure().recoverWithItem(err -> {
+                    System.err.println("[ScanReceipt] Error: " + err.getMessage());
+                    OcrReceiptResultDTO errResult = new OcrReceiptResultDTO();
+                    errResult.setSuccess(false);
+                    errResult.setErrorMessage(err.getMessage());
+                    return Response.serverError().entity(errResult).build();
+                });
+        });
     }
 
     @GET
     @Path("/{id}")
     public Uni<Response> getById(@PathParam("id") Long id) {
-        return claimService.getById(id)
+        return access.gate(CODE, () -> claimService.getById(id)
             .map(dto -> dto == null
                 ? Response.status(Response.Status.NOT_FOUND).build()
-                : Response.ok(dto).build());
+                : Response.ok(dto).build()));
     }
 
     @GET
     public Uni<Response> listByStaff(@QueryParam("staffId") String staffId) {
-        if (staffId == null || staffId.isBlank()) {
-            return Uni.createFrom().item(
-                Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "staffId is required"))
-                    .build());
-        }
-        return claimService.listByStaff(staffId)
-            .map(list -> Response.ok(list).build());
+        return access.gate(CODE, () -> {
+            if (staffId == null || staffId.isBlank()) {
+                return Uni.createFrom().item(
+                    Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error", "staffId is required"))
+                        .build());
+            }
+            return claimService.listByStaff(staffId)
+                .map(list -> Response.ok(list).build());
+        });
     }
 
     @GET
     @Path("/current-month")
     public Uni<Response> listCurrentMonth(@QueryParam("staffId") String staffId) {
-        if (staffId == null || staffId.isBlank()) {
-            return Uni.createFrom().item(
-                Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "staffId is required"))
-                    .build());
-        }
-        return claimService.listCurrentMonth(staffId)
-            .map(list -> Response.ok(list).build());
+        return access.gate(CODE, () -> {
+            if (staffId == null || staffId.isBlank()) {
+                return Uni.createFrom().item(
+                    Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error", "staffId is required"))
+                        .build());
+            }
+            return claimService.listCurrentMonth(staffId)
+                .map(list -> Response.ok(list).build());
+        });
     }
 
     @GET
     @Path("/{id}/photo")
     public Uni<Response> getPhoto(@PathParam("id") Long id) {
-        return attachmentService.getAttachments(StaffClaimDetailService.MODULE_TYPE, String.valueOf(id))
+        return access.gate(CODE, () -> attachmentService.getAttachments(StaffClaimDetailService.MODULE_TYPE, String.valueOf(id))
             .flatMap(atts -> {
                 if (atts == null || atts.isEmpty()) {
                     return Uni.createFrom().item(
@@ -195,6 +208,6 @@ public class StaffClaimDetailResource {
             .onFailure().recoverWithItem(err ->
                 Response.serverError()
                     .entity(Map.of("error", err.getMessage()))
-                    .build());
+                    .build()));
     }
 }

@@ -75,6 +75,18 @@ public class StaffRepository {
             });
     }
 
+    /**
+     * True when the group holds a granted access code (AccessValue = 1) for the module —
+     * reads m07GroupAuthorityAccess on the caller's tenant pool.
+     */
+    public Uni<Boolean> hasAccessCode(SqlClient client, String groupAuthority, String moduleId, String accessCode) {
+        return client.preparedQuery(
+                "SELECT COUNT(*) AS cnt FROM m07GroupAuthorityAccess " +
+                "WHERE GroupAuthority = ? AND ModuleId = ? AND AccessCode = ? AND AccessValue = 1")
+            .execute(Tuple.of(groupAuthority, moduleId, accessCode))
+            .map(rows -> rows.iterator().next().getLong("cnt") > 0);
+    }
+
     private Staff toEntity(Row row) {
         Staff s = new Staff();
         s.setCode(row.getLong("Code"));

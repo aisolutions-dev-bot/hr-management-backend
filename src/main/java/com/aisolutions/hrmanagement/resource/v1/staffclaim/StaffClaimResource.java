@@ -2,6 +2,7 @@ package com.aisolutions.hrmanagement.resource.v1.staffclaim;
 
 import com.aisolutions.hrmanagement.dto.StaffClaimDTO;
 import com.aisolutions.hrmanagement.dto.StaffClaimDetailDTO;
+import com.aisolutions.hrmanagement.service.auth.AccessControlService;
 import com.aisolutions.hrmanagement.service.staffclaim.StaffClaimService;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService.DeviceInfo;
 import com.aisolutions.hrmanagement.util.DeviceInfoExtractor;
@@ -43,6 +44,10 @@ import java.util.Map;
 public class StaffClaimResource {
 
     @Inject StaffClaimService claimService;
+    @Inject AccessControlService access;
+
+    /** The claim sub-module is gated by the claim-submission access code (mod18). */
+    private static final String CODE = AccessControlService.CLAIM_SUBMISSION;
 
     @Context HttpHeaders headers;
     @Context HttpServerRequest request;
@@ -54,9 +59,9 @@ public class StaffClaimResource {
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     public Uni<Response> createDraft(StaffClaimDTO dto) {
-        return claimService.createDraft(dto == null ? new StaffClaimDTO() : dto)
+        return access.gate(CODE, () -> claimService.createDraft(dto == null ? new StaffClaimDTO() : dto)
                 .map(saved -> Response.status(Response.Status.CREATED).entity(saved).build())
-                .onFailure().recoverWithItem(StaffClaimResource::toError);
+                .onFailure().recoverWithItem(StaffClaimResource::toError));
     }
 
     // ── GET-OR-CREATE THIS MONTH'S OPEN DRAFT ──
@@ -65,28 +70,30 @@ public class StaffClaimResource {
     @Path("/current-draft")
     @Consumes(MediaType.APPLICATION_JSON)
     public Uni<Response> currentDraft(StaffClaimDTO dto) {
-        return claimService.getOrCreateCurrentDraft(dto == null ? null : dto.getStaffId())
+        return access.gate(CODE, () -> claimService.getOrCreateCurrentDraft(dto == null ? null : dto.getStaffId())
                 .map(claim -> Response.ok(claim).build())
-                .onFailure().recoverWithItem(StaffClaimResource::toError);
+                .onFailure().recoverWithItem(StaffClaimResource::toError));
     }
 
     // ── LIST (header level) ──
     @GET
     public Uni<Response> listByStaff(@QueryParam("staffId") String staffId) {
-        if (staffId == null || staffId.isBlank()) {
-            return Uni.createFrom().item(badRequest("staffId is required"));
-        }
-        return claimService.listByStaff(staffId).map(list -> Response.ok(list).build());
+        return access.gate(CODE, () -> {
+            if (staffId == null || staffId.isBlank()) {
+                return Uni.createFrom().item(badRequest("staffId is required"));
+            }
+            return claimService.listByStaff(staffId).map(list -> Response.ok(list).build());
+        });
     }
 
     // ── GET ONE (with lines) ──
     @GET
     @Path("/{id}")
     public Uni<Response> getOne(@PathParam("id") Long id) {
-        return claimService.getWithLines(id)
+        return access.gate(CODE, () -> claimService.getWithLines(id)
                 .map(dto -> dto == null
                         ? Response.status(Response.Status.NOT_FOUND).build()
-                        : Response.ok(dto).build());
+                        : Response.ok(dto).build()));
     }
 
     // ── ADD LINE (multipart: claim JSON + optional photo) ──
@@ -98,32 +105,34 @@ public class StaffClaimResource {
             @RestForm("claim") String claimJson,
             @RestForm("photo") FileUpload photo) {
 
-        StaffClaimDetailDTO dto;
-        try {
-            dto = MAPPER.readValue(claimJson, StaffClaimDetailDTO.class);
-        } catch (Exception e) {
-            return Uni.createFrom().item(badRequest("Invalid claim JSON: " + e.getMessage()));
-        }
-
-        byte[] photoBytes = null;
-        String photoName = null;
-        String photoType = null;
-        if (photo != null) {
+        return access.gate(CODE, () -> {
+            StaffClaimDetailDTO dto;
             try {
-                photoBytes = Files.readAllBytes(photo.uploadedFile());
-                photoName = photo.fileName();
-                photoType = photo.contentType();
-            } catch (IOException e) {
-                return Uni.createFrom().item(
-                        Response.serverError().entity(Map.of("error",
-                                "Failed to read photo: " + e.getMessage())).build());
+                dto = MAPPER.readValue(claimJson, StaffClaimDetailDTO.class);
+            } catch (Exception e) {
+                return Uni.createFrom().item(badRequest("Invalid claim JSON: " + e.getMessage()));
             }
-        }
 
-        DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
-        return claimService.addLine(headerId, dto, photoBytes, photoName, photoType, deviceInfo)
-                .map(saved -> Response.status(Response.Status.CREATED).entity(saved).build())
-                .onFailure().recoverWithItem(StaffClaimResource::toError);
+            byte[] photoBytes = null;
+            String photoName = null;
+            String photoType = null;
+            if (photo != null) {
+                try {
+                    photoBytes = Files.readAllBytes(photo.uploadedFile());
+                    photoName = photo.fileName();
+                    photoType = photo.contentType();
+                } catch (IOException e) {
+                    return Uni.createFrom().item(
+                            Response.serverError().entity(Map.of("error",
+                                    "Failed to read photo: " + e.getMessage())).build());
+                }
+            }
+
+            DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
+            return claimService.addLine(headerId, dto, photoBytes, photoName, photoType, deviceInfo)
+                    .map(saved -> Response.status(Response.Status.CREATED).entity(saved).build())
+                    .onFailure().recoverWithItem(StaffClaimResource::toError);
+        });
     }
 
     // ── REMOVE LINE ──
@@ -131,19 +140,21 @@ public class StaffClaimResource {
     @Path("/{id}/lines/{lineId}")
     public Uni<Response> removeLine(@PathParam("id") Long headerId,
                                     @PathParam("lineId") Long lineId) {
-        return claimService.removeLine(headerId, lineId)
+        return access.gate(CODE, () -> claimService.removeLine(headerId, lineId)
                 .map(v -> Response.noContent().build())
-                .onFailure().recoverWithItem(StaffClaimResource::toError);
+                .onFailure().recoverWithItem(StaffClaimResource::toError));
     }
 
     // ── SUBMIT ──
     @POST
     @Path("/{id}/submit")
     public Uni<Response> submit(@PathParam("id") Long headerId) {
-        DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
-        return claimService.submit(headerId, deviceInfo)
-                .map(saved -> Response.ok(saved).build())
-                .onFailure().recoverWithItem(StaffClaimResource::toError);
+        return access.gate(CODE, () -> {
+            DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
+            return claimService.submit(headerId, deviceInfo)
+                    .map(saved -> Response.ok(saved).build())
+                    .onFailure().recoverWithItem(StaffClaimResource::toError);
+        });
     }
 
     // ── ACCEPT REJECTION (staff voids a rejected receipt) ──
@@ -151,10 +162,12 @@ public class StaffClaimResource {
     @Path("/{id}/lines/{lineId}/accept-rejection")
     public Uni<Response> acceptRejection(@PathParam("id") Long headerId,
                                          @PathParam("lineId") Long lineId) {
-        DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
-        return claimService.acceptRejection(headerId, lineId, deviceInfo)
-                .map(saved -> Response.ok(saved).build())
-                .onFailure().recoverWithItem(StaffClaimResource::toError);
+        return access.gate(CODE, () -> {
+            DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
+            return claimService.acceptRejection(headerId, lineId, deviceInfo)
+                    .map(saved -> Response.ok(saved).build())
+                    .onFailure().recoverWithItem(StaffClaimResource::toError);
+        });
     }
 
     // ── RESUBMIT REJECTED RECEIPT (fix/appeal → back to PENDING) ──
@@ -165,11 +178,13 @@ public class StaffClaimResource {
     public Uni<Response> resubmitRejectedLine(@PathParam("id") Long headerId,
                                               @PathParam("lineId") Long lineId,
                                               Map<String, String> body) {
-        String appeal = body == null ? null : body.get("appealDescription");
-        DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
-        return claimService.resubmitRejectedLine(headerId, lineId, appeal, deviceInfo)
-                .map(saved -> Response.ok(saved).build())
-                .onFailure().recoverWithItem(StaffClaimResource::toError);
+        return access.gate(CODE, () -> {
+            String appeal = body == null ? null : body.get("appealDescription");
+            DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
+            return claimService.resubmitRejectedLine(headerId, lineId, appeal, deviceInfo)
+                    .map(saved -> Response.ok(saved).build())
+                    .onFailure().recoverWithItem(StaffClaimResource::toError);
+        });
     }
 
     // ── EDIT & RESUBMIT REJECTED RECEIPT (scenario 1 — full edit + optional new photo) ──
@@ -183,31 +198,33 @@ public class StaffClaimResource {
             @RestForm("claim") String claimJson,
             @RestForm("photo") FileUpload photo) {
 
-        StaffClaimDetailDTO dto;
-        try {
-            dto = MAPPER.readValue(claimJson, StaffClaimDetailDTO.class);
-        } catch (Exception e) {
-            return Uni.createFrom().item(badRequest("Invalid claim JSON: " + e.getMessage()));
-        }
-
-        byte[] photoBytes = null;
-        String photoName = null;
-        String photoType = null;
-        if (photo != null) {
+        return access.gate(CODE, () -> {
+            StaffClaimDetailDTO dto;
             try {
-                photoBytes = Files.readAllBytes(photo.uploadedFile());
-                photoName = photo.fileName();
-                photoType = photo.contentType();
-            } catch (IOException e) {
-                return Uni.createFrom().item(
-                        Response.serverError().entity(Map.of("error",
-                                "Failed to read photo: " + e.getMessage())).build());
+                dto = MAPPER.readValue(claimJson, StaffClaimDetailDTO.class);
+            } catch (Exception e) {
+                return Uni.createFrom().item(badRequest("Invalid claim JSON: " + e.getMessage()));
             }
-        }
 
-        return claimService.editRejectedLine(headerId, lineId, dto, photoBytes, photoName, photoType)
-                .map(saved -> Response.ok(saved).build())
-                .onFailure().recoverWithItem(StaffClaimResource::toError);
+            byte[] photoBytes = null;
+            String photoName = null;
+            String photoType = null;
+            if (photo != null) {
+                try {
+                    photoBytes = Files.readAllBytes(photo.uploadedFile());
+                    photoName = photo.fileName();
+                    photoType = photo.contentType();
+                } catch (IOException e) {
+                    return Uni.createFrom().item(
+                            Response.serverError().entity(Map.of("error",
+                                    "Failed to read photo: " + e.getMessage())).build());
+                }
+            }
+
+            return claimService.editRejectedLine(headerId, lineId, dto, photoBytes, photoName, photoType)
+                    .map(saved -> Response.ok(saved).build())
+                    .onFailure().recoverWithItem(StaffClaimResource::toError);
+        });
     }
 
     // ── SUBMIT BATCH (body: [4, 5]) ──
@@ -215,10 +232,12 @@ public class StaffClaimResource {
     @Path("/submit-batch")
     @Consumes(MediaType.APPLICATION_JSON)
     public Uni<Response> submitBatch(List<Long> claimIds) {
-        DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
-        return claimService.submitBatch(claimIds, deviceInfo)
-                .map(saved -> Response.ok(saved).build())
-                .onFailure().recoverWithItem(StaffClaimResource::toError);
+        return access.gate(CODE, () -> {
+            DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
+            return claimService.submitBatch(claimIds, deviceInfo)
+                    .map(saved -> Response.ok(saved).build())
+                    .onFailure().recoverWithItem(StaffClaimResource::toError);
+        });
     }
 
     // ── error mapping ──

@@ -1,6 +1,7 @@
 package com.aisolutions.hrmanagement.resource.v1.leave;
 
 import com.aisolutions.hrmanagement.dto.LeaveApplicationDTO;
+import com.aisolutions.hrmanagement.service.auth.AccessControlService;
 import com.aisolutions.hrmanagement.service.leave.LeaveService;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService.DeviceInfo;
 import com.aisolutions.hrmanagement.util.DeviceInfoExtractor;
@@ -38,6 +39,10 @@ import java.util.Map;
 public class LeaveResource {
 
     @Inject LeaveService leaveService;
+    @Inject AccessControlService access;
+
+    /** The leave sub-module is gated by the leave-submission access code (mod18). */
+    private static final String CODE = AccessControlService.LEAVE_SUBMISSION;
 
     @Context HttpHeaders headers;
     @Context HttpServerRequest request;
@@ -46,23 +51,23 @@ public class LeaveResource {
     @GET
     @Path("/profile")
     public Uni<Response> profile(@QueryParam("staffId") String staffId) {
-        return leaveService.getProfile(staffId)
+        return access.gate(CODE, () -> leaveService.getProfile(staffId)
                 .map(dto -> Response.ok(dto).build())
-                .onFailure().recoverWithItem(LeaveResource::toError);
+                .onFailure().recoverWithItem(LeaveResource::toError));
     }
 
     // ── Step 2 dropdown ──
     @GET
     @Path("/leave-types")
     public Uni<Response> leaveTypes() {
-        return leaveService.getLeaveTypeOptions().map(list -> Response.ok(list).build());
+        return access.gate(CODE, () -> leaveService.getLeaveTypeOptions().map(list -> Response.ok(list).build()));
     }
 
     // ── Step 4 dropdown ──
     @GET
     @Path("/approvers")
     public Uni<Response> approvers() {
-        return leaveService.getApproverOptions().map(list -> Response.ok(list).build());
+        return access.gate(CODE, () -> leaveService.getApproverOptions().map(list -> Response.ok(list).build()));
     }
 
     // ── Balance (warn-only) ──
@@ -70,18 +75,18 @@ public class LeaveResource {
     @Path("/balance")
     public Uni<Response> balance(@QueryParam("staffId") String staffId,
                                  @QueryParam("leaveType") String leaveType) {
-        return leaveService.getBalance(staffId, leaveType)
+        return access.gate(CODE, () -> leaveService.getBalance(staffId, leaveType)
                 .map(dto -> Response.ok(dto).build())
-                .onFailure().recoverWithItem(LeaveResource::toError);
+                .onFailure().recoverWithItem(LeaveResource::toError));
     }
 
     // ── All-types balance summary (dashboard) ──
     @GET
     @Path("/balances")
     public Uni<Response> balances(@QueryParam("staffId") String staffId) {
-        return leaveService.getBalances(staffId)
+        return access.gate(CODE, () -> leaveService.getBalances(staffId)
                 .map(list -> Response.ok(list).build())
-                .onFailure().recoverWithItem(LeaveResource::toError);
+                .onFailure().recoverWithItem(LeaveResource::toError));
     }
 
     // ── Cancelable leaves (Step 3, Cancel) ──
@@ -89,9 +94,9 @@ public class LeaveResource {
     @Path("/cancelable")
     public Uni<Response> cancelable(@QueryParam("staffId") String staffId,
                                     @QueryParam("leaveType") String leaveType) {
-        return leaveService.getCancelable(staffId, leaveType)
+        return access.gate(CODE, () -> leaveService.getCancelable(staffId, leaveType)
                 .map(list -> Response.ok(list).build())
-                .onFailure().recoverWithItem(LeaveResource::toError);
+                .onFailure().recoverWithItem(LeaveResource::toError));
     }
 
     // ── Working-days preview (Step 3) ──
@@ -100,50 +105,56 @@ public class LeaveResource {
     public Uni<Response> workingDays(@QueryParam("from") String from,
                                      @QueryParam("to") String to,
                                      @QueryParam("half") String half) {
-        LocalDate fromDate;
-        LocalDate toDate;
-        try {
-            fromDate = (from == null || from.isBlank()) ? null : LocalDate.parse(from);
-            toDate   = (to == null || to.isBlank()) ? null : LocalDate.parse(to);
-        } catch (Exception e) {
-            return Uni.createFrom().item(badRequest("Invalid date (expected yyyy-MM-dd)"));
-        }
-        BigDecimal days = LeaveService.workingDays(fromDate, toDate, half);
-        Map<String, Object> body = new HashMap<>();
-        body.put("totalDays", days);
-        return Uni.createFrom().item(Response.ok(body).build());
+        return access.gate(CODE, () -> {
+            LocalDate fromDate;
+            LocalDate toDate;
+            try {
+                fromDate = (from == null || from.isBlank()) ? null : LocalDate.parse(from);
+                toDate   = (to == null || to.isBlank()) ? null : LocalDate.parse(to);
+            } catch (Exception e) {
+                return Uni.createFrom().item(badRequest("Invalid date (expected yyyy-MM-dd)"));
+            }
+            BigDecimal days = LeaveService.workingDays(fromDate, toDate, half);
+            Map<String, Object> body = new HashMap<>();
+            body.put("totalDays", days);
+            return Uni.createFrom().item(Response.ok(body).build());
+        });
     }
 
     // ── List ──
     @GET
     public Uni<Response> listByStaff(@QueryParam("staffId") String staffId) {
-        if (staffId == null || staffId.isBlank()) {
-            return Uni.createFrom().item(badRequest("staffId is required"));
-        }
-        return leaveService.listByStaff(staffId).map(list -> Response.ok(list).build());
+        return access.gate(CODE, () -> {
+            if (staffId == null || staffId.isBlank()) {
+                return Uni.createFrom().item(badRequest("staffId is required"));
+            }
+            return leaveService.listByStaff(staffId).map(list -> Response.ok(list).build());
+        });
     }
 
     // ── Get one ──
     @GET
     @Path("/{id}")
     public Uni<Response> getOne(@PathParam("id") Long id) {
-        return leaveService.getOne(id)
+        return access.gate(CODE, () -> leaveService.getOne(id)
                 .map(dto -> dto == null
                         ? Response.status(Response.Status.NOT_FOUND).build()
-                        : Response.ok(dto).build());
+                        : Response.ok(dto).build()));
     }
 
     // ── Submit ──
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     public Uni<Response> submit(LeaveApplicationDTO dto) {
-        if (dto == null) {
-            return Uni.createFrom().item(badRequest("A leave application body is required"));
-        }
-        DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
-        return leaveService.submitApplication(dto, deviceInfo)
-                .map(saved -> Response.status(Response.Status.CREATED).entity(saved).build())
-                .onFailure().recoverWithItem(LeaveResource::toError);
+        return access.gate(CODE, () -> {
+            if (dto == null) {
+                return Uni.createFrom().item(badRequest("A leave application body is required"));
+            }
+            DeviceInfo deviceInfo = DeviceInfoExtractor.extract(headers, request);
+            return leaveService.submitApplication(dto, deviceInfo)
+                    .map(saved -> Response.status(Response.Status.CREATED).entity(saved).build())
+                    .onFailure().recoverWithItem(LeaveResource::toError);
+        });
     }
 
     // ── error mapping ──

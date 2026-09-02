@@ -2,6 +2,7 @@ package com.aisolutions.hrmanagement.resource.v1.ocrtraining;
 
 import com.aisolutions.hrmanagement.dto.OcrReceiptResultDTO;
 import com.aisolutions.hrmanagement.dto.RecordCorrectionRequestDTO;
+import com.aisolutions.hrmanagement.service.auth.AccessControlService;
 import com.aisolutions.hrmanagement.service.ocrtraining.OcrTrainingService;
 
 import io.smallrye.mutiny.Uni;
@@ -33,22 +34,26 @@ import java.util.Map;
 public class OcrTrainingResource {
 
     @Inject OcrTrainingService trainingService;
+    @Inject AccessControlService access;
+
+    /** OCR training belongs to the claim sub-module — gated by the claim-submission code (mod18). */
+    private static final String CODE = AccessControlService.CLAIM_SUBMISSION;
 
     @POST
     @Path("/apply-training")
     public Uni<Response> applyTraining(OcrReceiptResultDTO input) {
-        return trainingService.applyTraining(input)
+        return access.gate(CODE, () -> trainingService.applyTraining(input)
             .map(enhanced -> Response.ok(enhanced).build())
             .onFailure().recoverWithItem(err ->
                 Response.serverError()
                     .entity(Map.of("error", err.getMessage()))
-                    .build());
+                    .build()));
     }
 
     @POST
     @Path("/record-correction")
     public Uni<Response> recordCorrection(RecordCorrectionRequestDTO request) {
-        return trainingService.recordCorrection(request)
+        return access.gate(CODE, () -> trainingService.recordCorrection(request)
             .replaceWith(Response.ok(Map.of("success", true)).build())
             .onFailure(IllegalArgumentException.class).recoverWithItem(err ->
                 Response.status(Response.Status.BAD_REQUEST)
@@ -60,88 +65,88 @@ public class OcrTrainingResource {
                 return Response.serverError()
                     .entity(Map.of("error", err.getMessage()))
                     .build();
-            });
+            }));
     }
 
     @GET
     @Path("/stats")
     public Uni<Response> getStats() {
-        return trainingService.getStats()
+        return access.gate(CODE, () -> trainingService.getStats()
             .map(s -> Response.ok(s).build())
             .onFailure().recoverWithItem(err ->
                 Response.serverError()
                     .entity(Map.of("error", err.getMessage()))
-                    .build());
+                    .build()));
     }
 
     @GET
     @Path("/aliases")
     public Uni<Response> listAliases() {
-        return trainingService.listAliases().map(list -> Response.ok(list).build());
+        return access.gate(CODE, () -> trainingService.listAliases().map(list -> Response.ok(list).build()));
     }
 
     @GET
     @Path("/merchant-rules")
     public Uni<Response> listMerchantRules() {
-        return trainingService.listMerchantRules().map(list -> Response.ok(list).build());
+        return access.gate(CODE, () -> trainingService.listMerchantRules().map(list -> Response.ok(list).build()));
     }
 
     @GET
     @Path("/global-rules")
     public Uni<Response> listGlobalRules() {
-        return trainingService.listGlobalRules().map(list -> Response.ok(list).build());
+        return access.gate(CODE, () -> trainingService.listGlobalRules().map(list -> Response.ok(list).build()));
     }
 
     @GET
     @Path("/corrections")
     public Uni<Response> listCorrections() {
-        return trainingService.listCorrections().map(list -> Response.ok(list).build());
+        return access.gate(CODE, () -> trainingService.listCorrections().map(list -> Response.ok(list).build()));
     }
 
     @DELETE
     @Path("/aliases/{id}")
     public Uni<Response> deleteAlias(@PathParam("id") Long id) {
-        return trainingService.deleteAlias(id)
+        return access.gate(CODE, () -> trainingService.deleteAlias(id)
             .map(deleted -> deleted
                 ? Response.ok(Map.of("success", true)).build()
-                : Response.status(Response.Status.NOT_FOUND).build());
+                : Response.status(Response.Status.NOT_FOUND).build()));
     }
 
     @DELETE
     @Path("/merchant-rules/{id}")
     public Uni<Response> deleteMerchantRule(@PathParam("id") Long id) {
-        return trainingService.deleteMerchantRule(id)
+        return access.gate(CODE, () -> trainingService.deleteMerchantRule(id)
             .map(deleted -> deleted
                 ? Response.ok(Map.of("success", true)).build()
-                : Response.status(Response.Status.NOT_FOUND).build());
+                : Response.status(Response.Status.NOT_FOUND).build()));
     }
 
     @DELETE
     @Path("/global-rules/{id}")
     public Uni<Response> deleteGlobalRule(@PathParam("id") Long id) {
-        return trainingService.deleteGlobalRule(id)
+        return access.gate(CODE, () -> trainingService.deleteGlobalRule(id)
             .map(deleted -> deleted
                 ? Response.ok(Map.of("success", true)).build()
-                : Response.status(Response.Status.NOT_FOUND).build());
+                : Response.status(Response.Status.NOT_FOUND).build()));
     }
 
     @DELETE
     @Path("/corrections/{id}")
     public Uni<Response> deleteCorrection(@PathParam("id") Long id) {
-        return trainingService.deleteCorrection(id)
+        return access.gate(CODE, () -> trainingService.deleteCorrection(id)
             .map(deleted -> deleted
                 ? Response.ok(Map.of("success", true)).build()
-                : Response.status(Response.Status.NOT_FOUND).build());
+                : Response.status(Response.Status.NOT_FOUND).build()));
     }
 
     @DELETE
     @Path("/all")
     public Uni<Response> clearAll() {
-        return trainingService.clearAllTrainingData()
+        return access.gate(CODE, () -> trainingService.clearAllTrainingData()
             .replaceWith(Response.ok(Map.of("success", true, "message", "All training data cleared")).build())
             .onFailure().recoverWithItem(err ->
                 Response.serverError()
                     .entity(Map.of("error", err.getMessage()))
-                    .build());
+                    .build()));
     }
 }
