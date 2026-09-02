@@ -22,14 +22,11 @@ public class UserActionLogService {
     public static final String STAFF_LEAVE = "STAFF-LEAVE";
   }
 
-  /** m07UserActionLog.Action values. */
+  /** m07UserActionLog.Action values — uppercase, matching every other module. */
   public static class Action {
-    public static final String ADD    = "Add";
-    public static final String EDIT   = "Edit";
-    public static final String SUBMIT = "Submit Claim";
-    public static final String VOID   = "Void";
-    public static final String APPLY_LEAVE  = "Apply Leave";
-    public static final String CANCEL_LEAVE = "Cancel Leave";
+    public static final String ADD    = "ADD";
+    public static final String EDIT   = "EDIT";
+    public static final String VOID   = "VOID";
   }
 
   /**

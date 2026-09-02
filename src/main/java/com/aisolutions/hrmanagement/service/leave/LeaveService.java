@@ -390,9 +390,9 @@ public class LeaveService {
     }
 
     private Uni<Void> logSubmit(LeaveApplication e, DeviceInfo deviceInfo) {
-        String action = ACTION_CANCEL.equals(e.getLeaveAction())
-                ? UserActionLogService.Action.CANCEL_LEAVE
-                : UserActionLogService.Action.APPLY_LEAVE;
+        // Applying and cancelling both create a leave record, so both log as ADD;
+        // the remark carries which one it was.
+        String action = UserActionLogService.Action.ADD;
         String remarks = (ACTION_CANCEL.equals(e.getLeaveAction())
                 ? "Requested cancellation of " : "Applied for ")
                 + nz(e.getLeaveType()) + " leave"

@@ -316,7 +316,7 @@ public class StaffClaimService {
                     });
                 })).map(saved -> toHeaderDto(saved, null))
                   .call(dto -> logAction(dto.getEntryStaff(), dto.getClaimPeriod(),
-                          UserActionLogService.Action.SUBMIT,
+                          UserActionLogService.Action.ADD,
                           "Submitted claim " + nz(dto.getClaimPeriod()) + " of amount "
                                   + plain(dto.getClaimAmount()), deviceInfo))
                   .call(this::notifyClaimSubmitted);
