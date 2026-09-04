@@ -46,7 +46,7 @@ dependencies {
     testImplementation("io.rest-assured:rest-assured")
 
     // MavenLocal
-    implementation("com.aisolutions:ai-solutions-java-shared:0.1.1")
+    implementation("com.aisolutions:ai-solutions-java-shared:0.2.1")
 
     // Google API Client Libraries
     implementation("com.google.api-client:google-api-client:2.8.0")
@@ -83,4 +83,9 @@ tasks.withType<Test> {
 tasks.withType<JavaCompile> {
     options.encoding = "UTF-8"
     options.compilerArgs.add("-parameters")
+}
+
+tasks.withType<JavaCompile>().configureEach {
+    options.compilerArgs.add("-Xlint:deprecation")
+    options.isDeprecation = true
 }

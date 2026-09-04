@@ -280,7 +280,7 @@ public class LeaveService {
                         .flatMap(entity -> saveAndNotify(pool, entity, deviceInfo)))));
     }
 
-    private Uni<LeaveApplicationDTO> saveAndNotify(io.vertx.mutiny.mysqlclient.MySQLPool pool,
+    private Uni<LeaveApplicationDTO> saveAndNotify(io.vertx.mutiny.sqlclient.Pool pool,
                                                     LeaveApplication entity, DeviceInfo deviceInfo) {
         return pool.withTransaction(tx -> leaveRepo.save(tx, entity))
             .flatMap(saved -> logSubmit(saved, deviceInfo).replaceWith(saved))

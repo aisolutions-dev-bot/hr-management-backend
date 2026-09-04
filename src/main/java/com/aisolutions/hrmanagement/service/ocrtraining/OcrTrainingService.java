@@ -355,7 +355,7 @@ public class OcrTrainingService {
                 }));
     }
 
-    private Uni<String> resolveMerchantName(io.vertx.mutiny.mysqlclient.MySQLPool pool, String ocrName, List<String> lines) {
+    private Uni<String> resolveMerchantName(io.vertx.mutiny.sqlclient.Pool pool, String ocrName, List<String> lines) {
         if (!StringNormalizer.isBlank(ocrName)) {
             String norm = StringNormalizer.normalise(ocrName);
             return aliasRepo.findByPatternExact(pool, norm)
