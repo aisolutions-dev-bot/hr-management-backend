@@ -25,11 +25,20 @@ public class LeaveBalanceDTO {
     private Integer serviceYears;     // completed years of service, null when no join date
     private boolean entitlementKnown; // false = no join date → balance not verified
 
-    private BigDecimal entitledDays;  // per-year entitlement from the matched band
+    private BigDecimal entitledDays;  // this year's entitlement (grant if any, else matched band)
     private BigDecimal takenDays;     // approved + pending days already booked this year
     private BigDecimal approvedDays;  // the approved slice of takenDays (used)
     private BigDecimal pendingDays;   // the still-pending slice of takenDays
-    private BigDecimal remainingDays; // entitled − taken (may be negative)
+    private BigDecimal remainingDays; // available − pending (may be negative)
+
+    // ── Carry-forward ──
+    private BigDecimal broughtForwardDays; // still-available days carried in from prior years
+    private BigDecimal expiringDays;       // available days that expire by the end of this year
+    private java.time.LocalDate expiryDate;// soonest upcoming expiry among available days
+    private BigDecimal lapsedDays;         // days already lost to expiry / the carry cap
+
+    /** Where entitledDays came from: ASSIGNED = HR's stored entitlement, LADDER = leave-type bands. */
+    private String entitlementSource;
 
     /** Human-readable note for the UI, e.g. "No join date on record — balance not verified". */
     private String message;

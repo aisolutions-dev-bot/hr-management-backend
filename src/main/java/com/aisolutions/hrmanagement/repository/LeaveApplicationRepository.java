@@ -127,13 +127,13 @@ public class LeaveApplicationRepository {
             .map(this::toList);
     }
 
-    /** Total leave days committed for a leave type in a date window (PENDING or APPROVED). */
-    public Uni<BigDecimal> sumBookedDays(SqlClient client, String staffId, String leaveType,
-                                         LocalDate windowStart, LocalDate windowEnd) {
+    /** Still-pending leave days for a leave type in a date window (a soft hold, not yet committed). */
+    public Uni<BigDecimal> sumPendingDays(SqlClient client, String staffId, String leaveType,
+                                          LocalDate windowStart, LocalDate windowEnd) {
         return client.preparedQuery(
                 "SELECT SUM(TotalDays) AS total FROM m18LeaveApplications " +
                 "WHERE StaffId = ? AND LeaveType = ? " +
-                "AND LeaveAction = 'APPLY' AND Status IN ('PENDING', 'APPROVED') " +
+                "AND LeaveAction = 'APPLY' AND Status = 'PENDING' " +
                 "AND FromDate >= ? AND FromDate <= ?")
             .execute(Tuple.tuple().addValue(staffId).addValue(leaveType)
                 .addValue(windowStart).addValue(windowEnd))

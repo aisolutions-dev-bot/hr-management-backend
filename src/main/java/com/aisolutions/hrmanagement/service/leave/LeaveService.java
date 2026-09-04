@@ -3,11 +3,13 @@ package com.aisolutions.hrmanagement.service.leave;
 import com.aisolutions.hrmanagement.dto.DropdownOptionDTO;
 import com.aisolutions.hrmanagement.dto.LeaveApplicationDTO;
 import com.aisolutions.hrmanagement.dto.LeaveBalanceDTO;
+import com.aisolutions.hrmanagement.dto.LeaveLedgerRow;
 import com.aisolutions.hrmanagement.dto.StaffProfileDTO;
 import com.aisolutions.hrmanagement.entity.LeaveApplication;
 import com.aisolutions.hrmanagement.entity.LeaveTypeEntitlement;
 import com.aisolutions.hrmanagement.entity.Staff;
 import com.aisolutions.hrmanagement.repository.LeaveApplicationRepository;
+import com.aisolutions.hrmanagement.repository.LeaveLedgerRepository;
 import com.aisolutions.hrmanagement.repository.LeaveTypeRepository;
 import com.aisolutions.hrmanagement.repository.NotificationRepository;
 import com.aisolutions.hrmanagement.repository.StaffRepository;
@@ -33,6 +35,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @ApplicationScoped
 public class LeaveService {
@@ -58,6 +61,7 @@ public class LeaveService {
 
     @Inject LeaveApplicationRepository leaveRepo;
     @Inject LeaveTypeRepository leaveTypeRepo;
+    @Inject LeaveLedgerRepository ledgerRepo;
     @Inject StaffRepository staffRepo;
     @Inject CurrentUserService currentUserService;
     @Inject UserActionLogService userActionLogService;
@@ -101,22 +105,51 @@ public class LeaveService {
                                                    String staffId, Staff staff, String leaveType) {
         return leaveTypeRepo.findDescription(pool, leaveType)
             .flatMap(desc -> leaveTypeRepo.findEntitlements(pool, leaveType)
-                .flatMap(bands -> {
-                    int year = DateUtil.nowSGT().getYear();
-                    LocalDate start = LocalDate.of(year, 1, 1);
-                    LocalDate end   = LocalDate.of(year, 12, 31);
-                    return leaveRepo.sumBookedDays(pool, staffId, leaveType, start, end)
-                        .map(taken -> buildSingleBalance(staff, leaveType, desc, bands, year, taken));
-                }));
+                .flatMap(bands -> leaveTypeRepo.isEligibleOnRequest(pool, leaveType)
+                    .flatMap(onRequest -> {
+                        int year = DateUtil.nowSGT().getYear();
+                        LocalDate today = DateUtil.nowSGT().toLocalDate();
+                        LocalDate start = LocalDate.of(year, 1, 1);
+                        LocalDate end   = LocalDate.of(year, 12, 31);
+                        // Grant + used days come from the ledger (FIFO/expiry); pending is a live soft hold.
+                        return leaveRepo.sumPendingDays(pool, staffId, leaveType, start, end)
+                            .flatMap(pending -> leaveTypeRepo.findCarryForwardCap(pool, leaveType)
+                                .flatMap(cap -> ledgerRepo.findRows(pool, staffId, leaveType)
+                                    .onFailure().recoverWithItem(List.<LeaveLedgerRow>of())
+                                    .map(rows -> buildSingleBalance(staff, leaveType, desc, bands, year, pending,
+                                            LeaveBalanceCalculator.compute(rows, cap, year, today),
+                                            Boolean.TRUE.equals(onRequest)))));
+                    })));
     }
 
     private LeaveBalanceDTO buildSingleBalance(Staff staff, String leaveType, String desc,
-                                                List<LeaveTypeEntitlement> bands, int year, BigDecimal taken) {
+                                                List<LeaveTypeEntitlement> bands, int year, BigDecimal pending,
+                                                LeaveBalanceCalculator.Result res, boolean onRequest) {
         LeaveBalanceDTO dto = new LeaveBalanceDTO();
         dto.setLeaveType(leaveType);
         dto.setLeaveTypeDescription(desc);
         dto.setYear(year);
+        BigDecimal approved = nz(res.approved());
+        BigDecimal taken = approved.add(pending);
+        dto.setApprovedDays(approved);
+        dto.setPendingDays(pending);
         dto.setTakenDays(taken);
+        // The ledger's assigned entitlement (GRANT buckets) wins over the ladder when present.
+        if (res.hasGrant()) {
+            applyLedgerBalance(dto, res, pending);
+            return dto;
+        }
+        // On-request type with no HR-assigned record: not auto-entitled from the ladder.
+        if (onRequest) {
+            dto.setEntitlementKnown(false);
+            dto.setServiceYears(null);
+            dto.setEntitledDays(null);
+            dto.setRemainingDays(null);
+            dto.setEntitlementSource("REQUEST");
+            dto.setMessage("Granted on request — no entitlement assigned yet.");
+            return dto;
+        }
+        dto.setEntitlementSource("LADDER");
         Integer serviceYears = serviceYears(staff);
         if (serviceYears == null) {
             dto.setEntitlementKnown(false);
@@ -152,59 +185,76 @@ public class LeaveService {
                                                            String staffId, Staff staff) {
         return leaveTypeRepo.findAllOptions(pool)
             .flatMap(types -> leaveTypeRepo.findAllEntitlements(pool)
-                .flatMap(allBands -> {
-                    int year = DateUtil.nowSGT().getYear();
-                    LocalDate start = LocalDate.of(year, 1, 1);
-                    LocalDate end   = LocalDate.of(year, 12, 31);
-                    return leaveRepo.sumBookedDaysByTypeAndStatus(pool, staffId, start, end)
-                        .map(rows -> aggregateBalances(staff, types, allBands, year, rows));
-                }));
+                .flatMap(allBands -> leaveTypeRepo.findEligibleOnRequestCodes(pool)
+                    .flatMap(onRequestCodes -> leaveTypeRepo.findCarryForwardCaps(pool)
+                        .flatMap(caps -> {
+                            int year = DateUtil.nowSGT().getYear();
+                            LocalDate today = DateUtil.nowSGT().toLocalDate();
+                            LocalDate start = LocalDate.of(year, 1, 1);
+                            LocalDate end   = LocalDate.of(year, 12, 31);
+                            // Pending (live soft hold) from the applications; grant + used from the ledger.
+                            return leaveRepo.sumBookedDaysByTypeAndStatus(pool, staffId, start, end)
+                                .flatMap(prows -> ledgerRepo.findRowsByStaff(pool, staffId)
+                                    .onFailure().recoverWithItem(List.<LeaveLedgerRow>of())
+                                    .map(ledgerRows -> aggregateBalances(staff, types, allBands, year, today,
+                                            prows, ledgerRows, caps, onRequestCodes)));
+                        }))));
     }
 
     private List<LeaveBalanceDTO> aggregateBalances(Staff staff, List<DropdownOptionDTO> types,
-                                                     List<LeaveTypeEntitlement> allBands, int year,
-                                                     List<Row> rows) {
+                                                     List<LeaveTypeEntitlement> allBands, int year, LocalDate today,
+                                                     List<Row> prows, List<LeaveLedgerRow> ledgerRows,
+                                                     Map<String, Integer> caps, Set<String> onRequestCodes) {
         Map<String, List<LeaveTypeEntitlement>> bandsByType = new LinkedHashMap<>();
         for (LeaveTypeEntitlement b : allBands) {
             bandsByType.computeIfAbsent(b.getLeaveType(), k -> new ArrayList<>()).add(b);
         }
-        Map<String, BigDecimal> approvedByType = new HashMap<>();
         Map<String, BigDecimal> pendingByType = new HashMap<>();
-        for (Row r : rows) {
+        for (Row r : prows) {
+            if (!STATUS_PENDING.equals(r.getString("Status"))) continue;
             String lt = r.getString("LeaveType");
-            String st = r.getString("Status");
             BigDecimal sum = r.getBigDecimal("total");
-            if (sum == null) sum = BigDecimal.ZERO;
-            if (STATUS_APPROVED.equals(st)) {
-                approvedByType.merge(lt, sum, BigDecimal::add);
-            } else if (STATUS_PENDING.equals(st)) {
-                pendingByType.merge(lt, sum, BigDecimal::add);
-            }
+            pendingByType.merge(lt, sum != null ? sum : BigDecimal.ZERO, BigDecimal::add);
+        }
+        Map<String, List<LeaveLedgerRow>> rowsByType = new LinkedHashMap<>();
+        for (LeaveLedgerRow r : ledgerRows) {
+            rowsByType.computeIfAbsent(r.leaveType(), k -> new ArrayList<>()).add(r);
         }
         Integer serviceYears = serviceYears(staff);
         List<LeaveBalanceDTO> out = new ArrayList<>();
         for (DropdownOptionDTO type : types) {
             String code = type.getValue();
             List<LeaveTypeEntitlement> bands = bandsByType.get(code);
-            if (bands == null || bands.isEmpty()) continue;
-            out.add(buildBalance(code, type.getLabel(), bands, serviceYears, year,
-                    approvedByType.getOrDefault(code, BigDecimal.ZERO),
-                    pendingByType.getOrDefault(code, BigDecimal.ZERO)));
+            boolean hasBands = bands != null && !bands.isEmpty();
+            LeaveBalanceCalculator.Result res = LeaveBalanceCalculator.compute(
+                    rowsByType.getOrDefault(code, List.of()), caps.get(code), year, today);
+            // Without a GRANT bucket: an on-request type never auto-shows (regardless of any ladder
+            // bands left on it), and a type with no ladder band has nothing to show.
+            if (!res.hasGrant() && (onRequestCodes.contains(code) || !hasBands)) continue;
+            out.add(buildBalance(code, type.getLabel(), hasBands ? bands : List.of(), serviceYears, year,
+                    res, pendingByType.getOrDefault(code, BigDecimal.ZERO)));
         }
         return out;
     }
 
     private static LeaveBalanceDTO buildBalance(String leaveType, String description,
                                                 List<LeaveTypeEntitlement> bands, Integer serviceYears,
-                                                int year, BigDecimal approved, BigDecimal pending) {
+                                                int year, LeaveBalanceCalculator.Result res, BigDecimal pending) {
         LeaveBalanceDTO dto = new LeaveBalanceDTO();
         dto.setLeaveType(leaveType);
         dto.setLeaveTypeDescription(description);
         dto.setYear(year);
+        BigDecimal approved = nz(res.approved());
+        BigDecimal taken = approved.add(pending);
         dto.setApprovedDays(approved);
         dto.setPendingDays(pending);
-        BigDecimal taken = approved.add(pending);
         dto.setTakenDays(taken);
+        // The ledger's assigned entitlement (GRANT buckets) wins over the ladder when present.
+        if (res.hasGrant()) {
+            applyLedgerBalance(dto, res, pending);
+            return dto;
+        }
+        dto.setEntitlementSource("LADDER");
         if (serviceYears == null) {
             dto.setEntitlementKnown(false);
             dto.setServiceYears(null);
@@ -223,6 +273,28 @@ public class LeaveService {
                     + serviceYears + " year(s) of service) — no annual entitlement yet.");
         }
         return dto;
+    }
+
+    /**
+     * Apply a ledger-computed balance (GRANT buckets, with carry-forward and expiry): it is
+     * authoritative and overrides the ladder, so it also clears the "no join date — not verified"
+     * state for manual-entry staff.
+     */
+    private static void applyLedgerBalance(LeaveBalanceDTO dto, LeaveBalanceCalculator.Result res, BigDecimal pending) {
+        dto.setEntitlementKnown(true);
+        dto.setServiceYears(res.serviceYears());   // snapshot from the year's grant; may be null
+        dto.setEntitledDays(nz(res.entitled()));
+        dto.setBroughtForwardDays(nz(res.broughtForward()));
+        dto.setRemainingDays(nz(res.available()).subtract(pending));
+        dto.setExpiringDays(nz(res.expiring()));
+        dto.setExpiryDate(res.nextExpiry());
+        dto.setLapsedDays(nz(res.lapsed()));
+        dto.setEntitlementSource("ASSIGNED");
+        dto.setMessage(null);
+    }
+
+    private static BigDecimal nz(BigDecimal v) {
+        return v != null ? v : BigDecimal.ZERO;
     }
 
     public Uni<List<LeaveApplicationDTO>> getCancelable(String requestedStaffId, String leaveType) {

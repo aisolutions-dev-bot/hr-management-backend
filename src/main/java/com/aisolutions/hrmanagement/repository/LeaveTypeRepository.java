@@ -13,11 +13,77 @@ import jakarta.enterprise.context.ApplicationScoped;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 @ApplicationScoped
 @Slf4j
 public class LeaveTypeRepository {
+
+    /** Codes of leave types granted on request (EligibleOnRequest = 1). Fail-safe empty. */
+    public Uni<Set<String>> findEligibleOnRequestCodes(SqlClient client) {
+        return client.preparedQuery("SELECT LeaveType FROM m01LeaveType WHERE EligibleOnRequest = 1")
+            .execute()
+            .map(rows -> {
+                Set<String> codes = new HashSet<>();
+                for (Row row : rows) {
+                    String code = row.getString("LeaveType");
+                    if (code != null) codes.add(code);
+                }
+                return codes;
+            })
+            .onFailure().recoverWithItem(Set.of());
+    }
+
+    /** True when the leave type is granted on request (not auto-entitled from the ladder). Fail-safe false. */
+    public Uni<Boolean> isEligibleOnRequest(SqlClient client, String leaveType) {
+        if (leaveType == null || leaveType.isBlank()) {
+            return Uni.createFrom().item(false);
+        }
+        return client.preparedQuery("SELECT EligibleOnRequest FROM m01LeaveType WHERE LeaveType = ?")
+            .execute(Tuple.of(leaveType.trim()))
+            .map(rows -> rows.iterator().hasNext()
+                    && Boolean.TRUE.equals(rows.iterator().next().getBoolean("EligibleOnRequest")))
+            .onFailure().recoverWithItem(false);
+    }
+
+    /** Carry-forward cap (max days that may carry) per leave type; only types with a positive
+     *  cap appear. NULL/0 means no cap. Fail-safe empty. */
+    public Uni<Map<String, Integer>> findCarryForwardCaps(SqlClient client) {
+        return client.preparedQuery(
+                "SELECT LeaveType, BroughtForwardCap FROM m01LeaveType " +
+                "WHERE BroughtForwardCap IS NOT NULL AND BroughtForwardCap > 0")
+            .execute()
+            .map(rows -> {
+                Map<String, Integer> caps = new HashMap<>();
+                for (Row row : rows) {
+                    String code = row.getString("LeaveType");
+                    Integer cap = row.getInteger("BroughtForwardCap");
+                    if (code != null && cap != null) caps.put(code, cap);
+                }
+                return caps;
+            })
+            .onFailure().recoverWithItem(Map.of());
+    }
+
+    /** Carry-forward cap for one leave type, or null when unset/zero. Fail-safe null. */
+    public Uni<Integer> findCarryForwardCap(SqlClient client, String leaveType) {
+        if (leaveType == null || leaveType.isBlank()) {
+            return Uni.createFrom().nullItem();
+        }
+        return client.preparedQuery(
+                "SELECT BroughtForwardCap FROM m01LeaveType WHERE LeaveType = ?")
+            .execute(Tuple.of(leaveType.trim()))
+            .map(rows -> {
+                if (!rows.iterator().hasNext()) return null;
+                Integer cap = rows.iterator().next().getInteger("BroughtForwardCap");
+                return (cap != null && cap > 0) ? cap : null;
+            })
+            .onFailure().recoverWithItem((Integer) null);
+    }
 
     /** Leave types as dropdown options (value = code, label = description). */
     public Uni<List<DropdownOptionDTO>> findAllOptions(SqlClient client) {
