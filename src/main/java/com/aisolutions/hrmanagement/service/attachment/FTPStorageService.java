@@ -137,7 +137,6 @@ public class FTPStorageService {
         }
         ftp.setFileType(FTP.BINARY_FILE_TYPE);
         ftp.enterLocalPassiveMode();
-        LOG.info("[FTP] Connected");
     }
 
     private void disconnect(FTPClient ftp) {
@@ -145,7 +144,6 @@ public class FTPStorageService {
             if (ftp.isConnected()) {
                 ftp.logout();
                 ftp.disconnect();
-                LOG.info("[FTP] Disconnected");
             }
         } catch (IOException ignored) {}
     }
