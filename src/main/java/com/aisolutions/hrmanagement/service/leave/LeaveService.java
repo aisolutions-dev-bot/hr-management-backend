@@ -14,6 +14,8 @@ import com.aisolutions.hrmanagement.repository.LeaveTypeRepository;
 import com.aisolutions.hrmanagement.repository.NotificationRepository;
 import com.aisolutions.hrmanagement.repository.StaffRepository;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
+import com.aisolutions.hrmanagement.service.SystemParameterService;
+import com.aisolutions.hrmanagement.service.email.EmailNotificationService;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService.DeviceInfo;
 import com.aisolutions.shared.tenancy.CompanyPoolManager;
@@ -67,6 +69,8 @@ public class LeaveService {
     @Inject UserActionLogService userActionLogService;
     @Inject NotificationRepository notificationRepo;
     @Inject CompanyPoolManager companyPoolManager;
+    @Inject SystemParameterService systemParameterService;
+    @Inject EmailNotificationService emailNotificationService;
 
     /** Step 1 prefill: the current user's name + department (locked fields). */
     public Uni<StaffProfileDTO> getProfile(String requestedStaffId) {
@@ -324,9 +328,18 @@ public class LeaveService {
                         dto.setLeaveTypeDescription(desc);
                         return staffRepo.findNameByStaffId(pool, e.getApproverStaffId())
                             .onFailure().recoverWithItem((String) null)
-                            .map(approverName -> {
+                            .flatMap(approverName -> {
                                 dto.setApproverName(approverName);
-                                return dto;
+                                // Resolve the decider's name too (approvedBy holds their staff id).
+                                if (e.getApprovedBy() == null || e.getApprovedBy().isBlank()) {
+                                    return Uni.createFrom().item(dto);
+                                }
+                                return staffRepo.findNameByStaffId(pool, e.getApprovedBy())
+                                    .onFailure().recoverWithItem((String) null)
+                                    .map(decidedByName -> {
+                                        dto.setApprovedByName(decidedByName);
+                                        return dto;
+                                    });
                             });
                     });
             }));
@@ -357,6 +370,8 @@ public class LeaveService {
         return pool.withTransaction(tx -> leaveRepo.save(tx, entity))
             .flatMap(saved -> logSubmit(saved, deviceInfo).replaceWith(saved))
             .call(this::notifyApprover)
+            // Email is fire-and-forget on the tenant pool so the response never waits on SMTP.
+            .invoke(saved -> emailApprover(pool, saved).subscribe().with(ignored -> {}, err -> {}))
             .flatMap(saved -> getOne(saved.getUniqId()));
     }
 
@@ -495,6 +510,39 @@ public class LeaveService {
                             approver, e.getStaffId(), String.valueOf(e.getUniqId()))))
             .replaceWithVoid()
             .onFailure().recoverWithItem((Void) null);
+    }
+
+    /**
+     * Emails the approver the same "please review and approve" message as the in-app bell,
+     * gated by the NOTIFICATION-EMAIL parameter and the approver having an email on file.
+     * Best-effort: any failure is swallowed so a mail problem never affects the submission.
+     */
+    private Uni<Void> emailApprover(io.vertx.mutiny.sqlclient.Pool pool, LeaveApplication e) {
+        String approver = e.getApproverStaffId();
+        if (approver == null || approver.isBlank()) {
+            return Uni.createFrom().voidItem();
+        }
+        return systemParameterService.isNotificationEmailEnabled(pool).flatMap(enabled -> {
+            if (!Boolean.TRUE.equals(enabled)) {
+                return Uni.createFrom().voidItem();
+            }
+            return staffRepo.findByStaffId(pool, approver).flatMap(approverStaff -> {
+                String email = approverStaff != null ? approverStaff.getEmailCompany() : null;
+                if (email == null || email.isBlank()) {
+                    return Uni.createFrom().voidItem();
+                }
+                String who = (e.getStaffName() != null && !e.getStaffName().isBlank())
+                        ? e.getStaffName() : e.getStaffId();
+                String approverName = (approverStaff.getName() != null && !approverStaff.getName().isBlank())
+                        ? approverStaff.getName() : approver;
+                boolean cancel = ACTION_CANCEL.equals(e.getLeaveAction());
+                String subject = (cancel ? "Leave cancellation request from " : "Leave application from ")
+                        + who + " - " + nz(e.getLeaveType());
+                String html = LeaveEmailTemplate.buildSubmittedEmail(
+                        approverName, who, nz(e.getLeaveType()), periodText(e), cancel, e.getRemarks());
+                return emailNotificationService.sendReactive(email, subject, html).replaceWithVoid();
+            });
+        }).onFailure().recoverWithItem((Void) null);
     }
 
     private Uni<String> resolveStaffId(String requestedStaffId) {

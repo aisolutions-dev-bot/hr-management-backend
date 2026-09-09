@@ -38,6 +38,10 @@ public class Staff {
     @Column(name = "Department", length = 25)
     private String department;
 
+    /** Company email address; the recipient for leave notification emails. May be null. */
+    @Column(name = "EmailCompany", length = 255)
+    private String emailCompany;
+
     /** Employment start date; the leave entitlement is computed from years of service.
      *  Null for staff whose join date HR has not recorded (~30% of rows). */
     @Column(name = "DateJoin")

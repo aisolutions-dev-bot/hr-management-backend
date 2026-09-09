@@ -23,6 +23,8 @@ public class SystemParameterService {
 
     public static final String PARAM_BASE_CURRENCY = "CURRENCY-BASE";
 
+    public static final String PARAM_NOTIFICATION_EMAIL = "NOTIFICATION-EMAIL";
+
     private static final List<String> FTP_PARAMS = List.of(
         "ATTACHMENT-MODE",
         "ATTACHMENT-MAIN-URL",
@@ -119,8 +121,40 @@ public class SystemParameterService {
      */
     public Uni<String> loadParameter(String name) {
         return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
-            .flatMap(pool -> systemParameterRepository.getParameterMap(pool, List.of(name)))
+            .flatMap(pool -> loadParameter(pool, name));
+    }
+
+    /** As {@link #loadParameter(String)} but on an already-resolved tenant pool — safe to run
+     *  off the request thread (no request-scoped company lookup). */
+    public Uni<String> loadParameter(io.vertx.mutiny.sqlclient.Pool pool, String name) {
+        return systemParameterRepository.getParameterMap(pool, List.of(name))
             .map(params -> params.get(name));
+    }
+
+    /**
+     * Whether leave-notification emails are switched on, from the NOTIFICATION-EMAIL
+     * parameter. Uncached so a toggle change takes effect immediately; a missing row or
+     * any read failure reads as disabled (fail-safe: never send when unsure).
+     */
+    public Uni<Boolean> isNotificationEmailEnabled() {
+        return loadParameter(PARAM_NOTIFICATION_EMAIL)
+            .map(SystemParameterService::truthy)
+            .onFailure().recoverWithItem(false);
+    }
+
+    /** As {@link #isNotificationEmailEnabled()} but on an already-resolved tenant pool. */
+    public Uni<Boolean> isNotificationEmailEnabled(io.vertx.mutiny.sqlclient.Pool pool) {
+        return loadParameter(pool, PARAM_NOTIFICATION_EMAIL)
+            .map(SystemParameterService::truthy)
+            .onFailure().recoverWithItem(false);
+    }
+
+    /** The org-api system-parameters screen writes "TRUE"/"FALSE"; accept common truthy forms too. */
+    private static boolean truthy(String value) {
+        if (value == null) return false;
+        String v = value.trim();
+        return v.equalsIgnoreCase("TRUE") || v.equalsIgnoreCase("Y")
+            || v.equalsIgnoreCase("YES") || v.equals("1") || v.equalsIgnoreCase("ON");
     }
 
     private static String require(Map<String, String> params, String key) {

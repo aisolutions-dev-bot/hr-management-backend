@@ -44,7 +44,8 @@ public class LeaveApplicationDTO {
 
     // Lifecycle
     private String status;
-    private String approvedBy;
+    private String approvedBy;      // decider's staff id
+    private String approvedByName;  // resolved on read for display
     private LocalDateTime approvedDate;
     private String rejectReason;
 
