@@ -25,6 +25,8 @@ public class SystemParameterService {
 
     public static final String PARAM_NOTIFICATION_EMAIL = "NOTIFICATION-EMAIL";
 
+    public static final String PARAM_NOTIFICATION_SMS = "NOTIFICATION-SMS";
+
     private static final List<String> FTP_PARAMS = List.of(
         "ATTACHMENT-MODE",
         "ATTACHMENT-MAIN-URL",
@@ -145,6 +147,13 @@ public class SystemParameterService {
     /** As {@link #isNotificationEmailEnabled()} but on an already-resolved tenant pool. */
     public Uni<Boolean> isNotificationEmailEnabled(io.vertx.mutiny.sqlclient.Pool pool) {
         return loadParameter(pool, PARAM_NOTIFICATION_EMAIL)
+            .map(SystemParameterService::truthy)
+            .onFailure().recoverWithItem(false);
+    }
+
+    /** As {@link #isNotificationEmailEnabled(io.vertx.mutiny.sqlclient.Pool)} but for NOTIFICATION-SMS. */
+    public Uni<Boolean> isNotificationSmsEnabled(io.vertx.mutiny.sqlclient.Pool pool) {
+        return loadParameter(pool, PARAM_NOTIFICATION_SMS)
             .map(SystemParameterService::truthy)
             .onFailure().recoverWithItem(false);
     }

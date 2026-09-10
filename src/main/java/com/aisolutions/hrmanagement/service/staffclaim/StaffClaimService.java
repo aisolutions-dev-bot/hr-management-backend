@@ -13,6 +13,7 @@ import com.aisolutions.hrmanagement.service.CurrentUserService;
 import com.aisolutions.hrmanagement.service.SystemParameterService;
 import com.aisolutions.hrmanagement.service.attachment.AttachmentService;
 import com.aisolutions.hrmanagement.service.email.EmailNotificationService;
+import com.aisolutions.hrmanagement.service.sms.SmsNotificationService;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService.DeviceInfo;
 import com.aisolutions.hrmanagement.util.StringNormalizer;
@@ -104,6 +105,7 @@ public class StaffClaimService {
     @Inject SystemParameterService systemParameterService;
     @Inject CompanyPoolManager companyPoolManager;
     @Inject EmailNotificationService emailNotificationService;
+    @Inject SmsNotificationService smsNotificationService;
 
     // ─────────────────────────────────────────────────────────
     //  CREATE DRAFT
@@ -322,8 +324,11 @@ public class StaffClaimService {
                           "Submitted claim " + nz(dto.getClaimPeriod()) + " of amount "
                                   + plain(dto.getClaimAmount()), deviceInfo))
                   .call(this::notifyClaimSubmitted)
-                  // Email is fire-and-forget (never waits on SMTP); reuses this method's pool.
-                  .invoke(dto -> emailClaimSubmitted(pool, dto).subscribe().with(ignored -> {}, err -> {}));
+                  // Email/SMS are fire-and-forget (never wait on the provider); reuse this method's pool.
+                  .invoke(dto -> {
+                      emailClaimSubmitted(pool, dto).subscribe().with(ignored -> {}, err -> {});
+                      smsClaimSubmitted(pool, dto).subscribe().with(ignored -> {}, err -> {});
+                  });
             }));
     }
 
@@ -480,10 +485,13 @@ public class StaffClaimService {
                             + (appealDescription != null && !appealDescription.isBlank()
                                     ? " with appeal" : ""), deviceInfo))
             .call(this::notifyClaimResubmitted)
-            // Email is fire-and-forget; pool is resolved here while still attached (see
-            // emailClaimSubmitted's javadoc) so the detached send needs no currentUserService call.
+            // Email/SMS are fire-and-forget; pool is resolved here while still attached (see
+            // emailClaimSubmitted's javadoc) so the detached sends need no currentUserService call.
             .flatMap(dto -> companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
-                    .invoke(pool -> emailClaimResubmitted(pool, dto).subscribe().with(ignored -> {}, err -> {}))
+                    .invoke(pool -> {
+                        emailClaimResubmitted(pool, dto).subscribe().with(ignored -> {}, err -> {});
+                        smsClaimResubmitted(pool, dto).subscribe().with(ignored -> {}, err -> {});
+                    })
                     .replaceWith(dto))
         );
     }
@@ -525,10 +533,13 @@ public class StaffClaimService {
             .flatMap(v -> recalcAndRollup(headerId, actor))
             .flatMap(h -> getWithLines(headerId))
             .call(this::notifyClaimResubmitted)
-            // Email is fire-and-forget; pool is resolved here while still attached (see
-            // emailClaimSubmitted's javadoc) so the detached send needs no currentUserService call.
+            // Email/SMS are fire-and-forget; pool is resolved here while still attached (see
+            // emailClaimSubmitted's javadoc) so the detached sends need no currentUserService call.
             .flatMap(result -> companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
-                    .invoke(pool -> emailClaimResubmitted(pool, result).subscribe().with(ignored -> {}, err -> {}))
+                    .invoke(pool -> {
+                        emailClaimResubmitted(pool, result).subscribe().with(ignored -> {}, err -> {});
+                        smsClaimResubmitted(pool, result).subscribe().with(ignored -> {}, err -> {});
+                    })
                     .replaceWith(result))
         );
     }
@@ -631,10 +642,11 @@ public class StaffClaimService {
                 .call(saved -> (becameApproved && saved != null)
                         ? notifyClaimApproved(saved)
                         : Uni.createFrom().voidItem())
-                // Email is fire-and-forget (never waits on SMTP); reuses this method's pool.
+                // Email/SMS are fire-and-forget (never wait on the provider); reuse this method's pool.
                 .invoke(saved -> {
                     if (becameApproved && saved != null) {
                         emailClaimApproved(pool, saved).subscribe().with(ignored -> {}, err -> {});
+                        smsClaimApproved(pool, saved).subscribe().with(ignored -> {}, err -> {});
                     }
                 });
             }));
@@ -808,6 +820,56 @@ public class StaffClaimService {
     }
 
     /**
+     * SMS counterpart of {@link #emailClaimSubmitted} — same recipient, gated by
+     * NOTIFICATION-SMS and the approver having a mobile number on file.
+     */
+    private Uni<Void> smsClaimSubmitted(io.vertx.mutiny.sqlclient.Pool pool, StaffClaimDTO claim) {
+        return systemParameterService.loadParameter(pool, PARAM_HR_APPROVER)
+            .onFailure().recoverWithItem((String) null)
+            .flatMap(recipient -> {
+                if (recipient == null || recipient.isBlank()) {
+                    System.err.println("[SMS] claim-submitted skipped for claim " + claim.getUniqId()
+                            + ": " + PARAM_HR_APPROVER + " not configured");
+                    return Uni.createFrom().voidItem();
+                }
+                return systemParameterService.isNotificationSmsEnabled(pool).flatMap(enabled -> {
+                    if (!Boolean.TRUE.equals(enabled)) {
+                        System.err.println("[SMS] claim-submitted skipped for claim " + claim.getUniqId()
+                                + ": NOTIFICATION-SMS is off");
+                        return Uni.createFrom().voidItem();
+                    }
+                    return staffRepo.findByStaffId(pool, recipient).flatMap(approverStaff -> {
+                        String mobile = approverStaff != null ? approverStaff.getTelMobile() : null;
+                        if (mobile == null || mobile.isBlank()) {
+                            System.err.println("[SMS] claim-submitted skipped for claim " + claim.getUniqId()
+                                    + ": approver " + recipient + " has no TelMobile");
+                            return Uni.createFrom().voidItem();
+                        }
+                        String submitter = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
+                        return staffRepo.findNameByStaffId(pool, submitter)
+                            .onFailure().recoverWithItem((String) null)
+                            .flatMap(name -> loadBaseCurrencySafe(pool).flatMap(baseCcy -> {
+                                String who = (name != null && !name.isBlank()) ? name : submitter;
+                                String text = "New staff claim submitted by " + who
+                                        + " - " + nz(claim.getClaimPeriod())
+                                        + ", " + money(baseCcy, claim.getClaimAmount()) + ". - AI Solutions";
+                                System.err.println("[SMS] claim-submitted sending to " + mobile
+                                        + " for claim " + claim.getUniqId());
+                                return smsNotificationService.sendReactive(mobile, text)
+                                        .invoke(sent -> System.err.println("[SMS] claim-submitted send "
+                                                + (sent ? "OK" : "FAILED") + " to " + mobile
+                                                + " for claim " + claim.getUniqId()))
+                                        .replaceWithVoid();
+                            }));
+                    });
+                });
+            })
+            .onFailure().invoke(err -> System.err.println(
+                    "[SMS] claim-submitted send failed for claim " + claim.getUniqId() + ": " + err))
+            .onFailure().recoverWithItem((Void) null);
+    }
+
+    /**
      * Emails the HR approver named by HR-ADMIN-APPRV-IN-CHARGE that a previously-rejected
      * receipt is back for review. Mirrors {@link #emailClaimSubmitted}; gated by the tenant
      * NOTIFICATION-EMAIL parameter and the approver having an email on file. Takes the
@@ -853,6 +915,55 @@ public class StaffClaimService {
     }
 
     /**
+     * SMS counterpart of {@link #emailClaimResubmitted} — same recipient, gated by
+     * NOTIFICATION-SMS and the approver having a mobile number on file.
+     */
+    private Uni<Void> smsClaimResubmitted(io.vertx.mutiny.sqlclient.Pool pool, StaffClaimDTO claim) {
+        return systemParameterService.loadParameter(pool, PARAM_HR_APPROVER)
+            .onFailure().recoverWithItem((String) null)
+            .flatMap(recipient -> {
+                if (recipient == null || recipient.isBlank()) {
+                    System.err.println("[SMS] claim-resubmitted skipped for claim " + claim.getUniqId()
+                            + ": " + PARAM_HR_APPROVER + " not configured");
+                    return Uni.createFrom().voidItem();
+                }
+                return systemParameterService.isNotificationSmsEnabled(pool).flatMap(enabled -> {
+                    if (!Boolean.TRUE.equals(enabled)) {
+                        System.err.println("[SMS] claim-resubmitted skipped for claim " + claim.getUniqId()
+                                + ": NOTIFICATION-SMS is off");
+                        return Uni.createFrom().voidItem();
+                    }
+                    return staffRepo.findByStaffId(pool, recipient).flatMap(approverStaff -> {
+                        String mobile = approverStaff != null ? approverStaff.getTelMobile() : null;
+                        if (mobile == null || mobile.isBlank()) {
+                            System.err.println("[SMS] claim-resubmitted skipped for claim " + claim.getUniqId()
+                                    + ": approver " + recipient + " has no TelMobile");
+                            return Uni.createFrom().voidItem();
+                        }
+                        String submitter = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
+                        return staffRepo.findNameByStaffId(pool, submitter)
+                            .onFailure().recoverWithItem((String) null)
+                            .flatMap(name -> {
+                                String who = (name != null && !name.isBlank()) ? name : submitter;
+                                String text = "Receipt resubmitted for review by " + who
+                                        + " - " + nz(claim.getClaimPeriod()) + ". - AI Solutions";
+                                System.err.println("[SMS] claim-resubmitted sending to " + mobile
+                                        + " for claim " + claim.getUniqId());
+                                return smsNotificationService.sendReactive(mobile, text)
+                                        .invoke(sent -> System.err.println("[SMS] claim-resubmitted send "
+                                                + (sent ? "OK" : "FAILED") + " to " + mobile
+                                                + " for claim " + claim.getUniqId()))
+                                        .replaceWithVoid();
+                            });
+                    });
+                });
+            })
+            .onFailure().invoke(err -> System.err.println(
+                    "[SMS] claim-resubmitted send failed for claim " + claim.getUniqId() + ": " + err))
+            .onFailure().recoverWithItem((Void) null);
+    }
+
+    /**
      * Emails the claimant that their claim is wholly approved, gated by the tenant
      * NOTIFICATION-EMAIL parameter and the claimant having an email on file. Best-effort:
      * any failure is swallowed. Takes the already-resolved tenant {@code pool} — see
@@ -885,6 +996,45 @@ public class StaffClaimService {
             .onFailure().invoke(err -> System.err.println(
                     "[Email] claim-approved send failed for claim " + claim.getUniqId() + ": " + err))
             .onFailure().recoverWithItem((Void) null);
+    }
+
+    /**
+     * SMS counterpart of {@link #emailClaimApproved} — same recipient, gated by
+     * NOTIFICATION-SMS and the claimant having a mobile number on file.
+     */
+    private Uni<Void> smsClaimApproved(io.vertx.mutiny.sqlclient.Pool pool, StaffClaim claim) {
+        String claimant = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
+        if (claimant == null || claimant.isBlank()) {
+            return Uni.createFrom().voidItem();
+        }
+        return systemParameterService.isNotificationSmsEnabled(pool).flatMap(enabled -> {
+            if (!Boolean.TRUE.equals(enabled)) {
+                System.err.println("[SMS] claim-approved skipped for claim " + claim.getUniqId()
+                        + ": NOTIFICATION-SMS is off");
+                return Uni.createFrom().voidItem();
+            }
+            return staffRepo.findByStaffId(pool, claimant).flatMap(staff -> {
+                String mobile = staff != null ? staff.getTelMobile() : null;
+                if (mobile == null || mobile.isBlank()) {
+                    System.err.println("[SMS] claim-approved skipped for claim " + claim.getUniqId()
+                            + ": claimant " + claimant + " has no TelMobile");
+                    return Uni.createFrom().voidItem();
+                }
+                return loadBaseCurrencySafe(pool).flatMap(baseCcy -> {
+                    String text = "Your " + nz(claim.getClaimPeriod()) + " claim of "
+                            + money(baseCcy, claim.getClaimAmount()) + " is approved. - AI Solutions";
+                    System.err.println("[SMS] claim-approved sending to " + mobile
+                            + " for claim " + claim.getUniqId());
+                    return smsNotificationService.sendReactive(mobile, text)
+                        .invoke(sent -> System.err.println("[SMS] claim-approved send "
+                                + (sent ? "OK" : "FAILED") + " to " + mobile
+                                + " for claim " + claim.getUniqId()))
+                        .replaceWithVoid();
+                });
+            });
+        }).onFailure().invoke(err -> System.err.println(
+                "[SMS] claim-approved send failed for claim " + claim.getUniqId() + ": " + err))
+          .onFailure().recoverWithItem((Void) null);
     }
 
     private Uni<Void> createNotification(String notificationType, String subject, String desc,

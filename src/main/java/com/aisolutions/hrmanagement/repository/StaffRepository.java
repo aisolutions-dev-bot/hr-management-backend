@@ -40,7 +40,7 @@ public class StaffRepository {
             return Uni.createFrom().nullItem();
         }
         return client.preparedQuery(
-                "SELECT Code, StaffId, Name, Department, EmailCompany, DateJoin, SystemUser, Status " +
+                "SELECT Code, StaffId, Name, Department, EmailCompany, TelMobile, DateJoin, SystemUser, Status " +
                 "FROM m03Staff WHERE StaffId = ? LIMIT 1")
             .execute(Tuple.tuple().addValue(staffId))
             .map(rows -> rows.iterator().hasNext() ? toEntity(rows.iterator().next()) : null);
@@ -93,6 +93,7 @@ public class StaffRepository {
         s.setName(row.getString("Name"));
         s.setDepartment(row.getString("Department"));
         s.setEmailCompany(row.getString("EmailCompany"));
+        s.setTelMobile(row.getString("TelMobile"));
         s.setDateJoin(row.getLocalDateTime("DateJoin"));
         s.setSystemUser(row.getString("SystemUser"));
         s.setStatus(row.getString("Status"));

@@ -19,6 +19,7 @@ import com.aisolutions.hrmanagement.service.approval.ApprovalFlowService;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
 import com.aisolutions.hrmanagement.service.SystemParameterService;
 import com.aisolutions.hrmanagement.service.email.EmailNotificationService;
+import com.aisolutions.hrmanagement.service.sms.SmsNotificationService;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService.DeviceInfo;
 import com.aisolutions.shared.tenancy.CompanyPoolManager;
@@ -74,6 +75,7 @@ public class LeaveService {
     @Inject CompanyPoolManager companyPoolManager;
     @Inject SystemParameterService systemParameterService;
     @Inject EmailNotificationService emailNotificationService;
+    @Inject SmsNotificationService smsNotificationService;
     @Inject ApprovalFlowService approvalFlowService;
 
     /** Step 1 prefill: the current user's name + department (locked fields). */
@@ -422,9 +424,12 @@ public class LeaveService {
             .flatMap(saved -> logSubmit(saved, deviceInfo).replaceWith(saved))
             .flatMap(saved -> resolveSubmitRecipients(pool, saved)
                 .call(recipients -> notifyApprovers(saved, recipients))
-                // Email is fire-and-forget on the tenant pool so the response never waits on SMTP.
-                .invoke(recipients -> emailApprovers(pool, saved, recipients)
-                        .subscribe().with(ignored -> {}, err -> {}))
+                // Email/SMS are fire-and-forget on the tenant pool so the response never waits
+                // on the provider.
+                .invoke(recipients -> {
+                    emailApprovers(pool, saved, recipients).subscribe().with(ignored -> {}, err -> {});
+                    smsApprovers(pool, saved, recipients).subscribe().with(ignored -> {}, err -> {});
+                })
                 .replaceWith(saved))
             .flatMap(saved -> getOne(saved.getUniqId()));
     }
@@ -628,6 +633,51 @@ public class LeaveService {
                     approverName, who, nz(e.getLeaveType()), periodText(e), cancel, e.getRemarks());
             return emailNotificationService.sendReactive(email, subject, html).replaceWithVoid();
         }).onFailure().recoverWithItem((Void) null);
+    }
+
+    /** SMS counterpart of {@link #emailApprovers} — NOTIFICATION-SMS gated once. */
+    private Uni<Void> smsApprovers(io.vertx.mutiny.sqlclient.Pool pool, LeaveApplication e,
+                                   List<String> recipients) {
+        if (recipients == null || recipients.isEmpty()) {
+            return Uni.createFrom().voidItem();
+        }
+        return systemParameterService.isNotificationSmsEnabled(pool).flatMap(enabled -> {
+            if (!Boolean.TRUE.equals(enabled)) {
+                System.err.println("[SMS] leave-submitted skipped for leave " + e.getUniqId()
+                        + ": NOTIFICATION-SMS is off");
+                return Uni.createFrom().voidItem();
+            }
+            Uni<Void> chain = Uni.createFrom().voidItem();
+            for (String approver : recipients) {
+                if (approver == null || approver.isBlank()) continue;
+                chain = chain.flatMap(v -> smsOneApprover(pool, e, approver));
+            }
+            return chain;
+        }).onFailure().recoverWithItem((Void) null);
+    }
+
+    /** Sends the submit SMS to one approver; NOTIFICATION-SMS gating is done by the caller. */
+    private Uni<Void> smsOneApprover(io.vertx.mutiny.sqlclient.Pool pool, LeaveApplication e, String approver) {
+        return staffRepo.findByStaffId(pool, approver).flatMap(approverStaff -> {
+            String mobile = approverStaff != null ? approverStaff.getTelMobile() : null;
+            if (mobile == null || mobile.isBlank()) {
+                System.err.println("[SMS] leave-submitted skipped for leave " + e.getUniqId()
+                        + ": approver " + approver + " has no TelMobile");
+                return Uni.createFrom().voidItem();
+            }
+            String who = (e.getStaffName() != null && !e.getStaffName().isBlank())
+                    ? e.getStaffName() : e.getStaffId();
+            boolean cancel = ACTION_CANCEL.equals(e.getLeaveAction());
+            String text = (cancel ? "Leave cancellation request from " : "Leave application from ")
+                    + who + " - " + nz(e.getLeaveType()) + periodText(e) + ". - AI Solutions";
+            System.err.println("[SMS] leave-submitted sending to " + mobile + " for leave " + e.getUniqId());
+            return smsNotificationService.sendReactive(mobile, text)
+                    .invoke(sent -> System.err.println("[SMS] leave-submitted send "
+                            + (sent ? "OK" : "FAILED") + " to " + mobile + " for leave " + e.getUniqId()))
+                    .replaceWithVoid();
+        }).onFailure().invoke(err -> System.err.println(
+                "[SMS] leave-submitted send failed for leave " + e.getUniqId() + ": " + err))
+          .onFailure().recoverWithItem((Void) null);
     }
 
     private Uni<String> resolveStaffId(String requestedStaffId) {

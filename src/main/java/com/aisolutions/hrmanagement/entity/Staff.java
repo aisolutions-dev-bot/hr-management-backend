@@ -42,6 +42,10 @@ public class Staff {
     @Column(name = "EmailCompany", length = 255)
     private String emailCompany;
 
+    /** Mobile number as stored (not guaranteed E.164); the recipient for SMS notifications. May be null. */
+    @Column(name = "TelMobile", length = 255)
+    private String telMobile;
+
     /** Employment start date; the leave entitlement is computed from years of service.
      *  Null for staff whose join date HR has not recorded (~30% of rows). */
     @Column(name = "DateJoin")
