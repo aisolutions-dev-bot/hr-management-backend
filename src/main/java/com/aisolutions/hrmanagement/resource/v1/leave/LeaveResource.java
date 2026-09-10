@@ -142,6 +142,26 @@ public class LeaveResource {
                         : Response.ok(dto).build()));
     }
 
+    // ── Approval flow (apply form hides the approver step + shows the chain when active) ──
+    @GET
+    @Path("/approval-flow")
+    public Uni<Response> approvalFlow() {
+        return access.gate(CODE, () -> leaveService.getApprovalFlow()
+                .map(flow -> Response.ok(flow).build())
+                .onFailure().recoverWithItem(LeaveResource::toError));
+    }
+
+    // ── Approval trail ──
+    @GET
+    @Path("/{id}/approval-trail")
+    public Uni<Response> approvalTrail(@PathParam("id") Long id) {
+        return access.gate(CODE, () -> leaveService.getApprovalTrail(id)
+                .map(dto -> dto == null
+                        ? Response.status(Response.Status.NOT_FOUND).build()
+                        : Response.ok(dto).build())
+                .onFailure().recoverWithItem(LeaveResource::toError));
+    }
+
     // ── Submit ──
     @POST
     @Consumes(MediaType.APPLICATION_JSON)

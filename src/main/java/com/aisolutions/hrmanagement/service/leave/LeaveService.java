@@ -1,5 +1,7 @@
 package com.aisolutions.hrmanagement.service.leave;
 
+import com.aisolutions.hrmanagement.dto.ApprovalFlowDTO;
+import com.aisolutions.hrmanagement.dto.ApprovalTrailDTO;
 import com.aisolutions.hrmanagement.dto.DropdownOptionDTO;
 import com.aisolutions.hrmanagement.dto.LeaveApplicationDTO;
 import com.aisolutions.hrmanagement.dto.LeaveBalanceDTO;
@@ -13,6 +15,7 @@ import com.aisolutions.hrmanagement.repository.LeaveLedgerRepository;
 import com.aisolutions.hrmanagement.repository.LeaveTypeRepository;
 import com.aisolutions.hrmanagement.repository.NotificationRepository;
 import com.aisolutions.hrmanagement.repository.StaffRepository;
+import com.aisolutions.hrmanagement.service.approval.ApprovalFlowService;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
 import com.aisolutions.hrmanagement.service.SystemParameterService;
 import com.aisolutions.hrmanagement.service.email.EmailNotificationService;
@@ -71,6 +74,7 @@ public class LeaveService {
     @Inject CompanyPoolManager companyPoolManager;
     @Inject SystemParameterService systemParameterService;
     @Inject EmailNotificationService emailNotificationService;
+    @Inject ApprovalFlowService approvalFlowService;
 
     /** Step 1 prefill: the current user's name + department (locked fields). */
     public Uni<StaffProfileDTO> getProfile(String requestedStaffId) {
@@ -345,6 +349,36 @@ public class LeaveService {
             }));
     }
 
+    /** Whether an approval flow governs leave — the apply form hides the approver step when true. */
+    public Uni<Boolean> isApprovalFlowActive() {
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+            .flatMap(pool -> approvalFlowService.isFlowActive(pool));
+    }
+
+    /**
+     * The approval flow the apply form shows the applicant: when active, its ordered
+     * tiers + approvers (the applicant does not choose one); otherwise inactive.
+     */
+    public Uni<ApprovalFlowDTO> getApprovalFlow() {
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+            .flatMap(pool -> approvalFlowService.flowChain(pool))
+            .map(chain -> {
+                List<ApprovalFlowDTO.Tier> tiers = chain.tiers().stream()
+                    .map(t -> new ApprovalFlowDTO.Tier(t.level(), t.staffId(),
+                            (t.staffName() != null && !t.staffName().isBlank()) ? t.staffName() : t.staffId(),
+                            t.dept()))
+                    .toList();
+                return new ApprovalFlowDTO(chain.active(), chain.mode(), tiers);
+            });
+    }
+
+    /** The approval trail for a leave, read from the m07ApprovalAction log (or the leave's own fields for legacy records). */
+    public Uni<ApprovalTrailDTO> getApprovalTrail(Long id) {
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
+            leaveRepo.findById(pool, id).flatMap(e ->
+                e == null ? Uni.createFrom().nullItem() : approvalFlowService.buildTrail(pool, e)));
+    }
+
     public Uni<LeaveApplicationDTO> submitApplication(LeaveApplicationDTO dto, DeviceInfo deviceInfo) {
         String action = normalizeAction(dto.getLeaveAction());
         if (action == null) {
@@ -354,25 +388,61 @@ public class LeaveService {
         if (dto.getLeaveType() == null || dto.getLeaveType().isBlank()) {
             return Uni.createFrom().failure(new IllegalArgumentException("Leave Type is required"));
         }
-        if (dto.getApproverStaffId() == null || dto.getApproverStaffId().isBlank()) {
-            return Uni.createFrom().failure(new IllegalArgumentException("An approver must be selected"));
-        }
 
         return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
-            .flatMap(pool -> resolveStaffId(dto.getStaffId())
-                .flatMap(staffId -> staffRepo.findByStaffId(pool, staffId)
-                    .flatMap(staff -> buildAndValidate(action, dto, staffId, staff, pool)
-                        .flatMap(entity -> saveAndNotify(pool, entity, deviceInfo)))));
+            .flatMap(pool -> approvalFlowService.initialPendingApprovers(pool).flatMap(flowApprovers -> {
+                // A configured flow decides the approver, so the applicant need not pick one; only the
+                // no-flow (fallback) path still requires a chosen approver. When a flow is active we seed
+                // the approver field with its first pending tier (a non-null pointer + fallback filter).
+                boolean flowActive = flowApprovers != null && !flowApprovers.isEmpty();
+                String chosen = dto.getApproverStaffId();
+                if (chosen == null || chosen.isBlank()) {
+                    if (flowActive) {
+                        dto.setApproverStaffId(flowApprovers.get(0));
+                    } else {
+                        return Uni.createFrom().<LeaveApplicationDTO>failure(
+                                new IllegalArgumentException("An approver must be selected"));
+                    }
+                }
+                return resolveStaffId(dto.getStaffId())
+                    .flatMap(staffId -> staffRepo.findByStaffId(pool, staffId)
+                        .flatMap(staff -> buildAndValidate(action, dto, staffId, staff, pool)
+                            .flatMap(entity -> saveAndNotify(pool, entity, deviceInfo))));
+            }));
     }
 
     private Uni<LeaveApplicationDTO> saveAndNotify(io.vertx.mutiny.sqlclient.Pool pool,
                                                     LeaveApplication entity, DeviceInfo deviceInfo) {
-        return pool.withTransaction(tx -> leaveRepo.save(tx, entity))
+        return pool.withTransaction(tx -> leaveRepo.save(tx, entity)
+                // Freeze the current flow onto this leave so later flow edits won't affect it.
+                .flatMap(saved -> approvalFlowService.snapshotAtSubmit(tx, saved.getUniqId(),
+                            saved.getEntryStaff() != null ? saved.getEntryStaff() : saved.getStaffId(),
+                            DateUtil.nowSGT())
+                        .replaceWith(saved)))
             .flatMap(saved -> logSubmit(saved, deviceInfo).replaceWith(saved))
-            .call(this::notifyApprover)
-            // Email is fire-and-forget on the tenant pool so the response never waits on SMTP.
-            .invoke(saved -> emailApprover(pool, saved).subscribe().with(ignored -> {}, err -> {}))
+            .flatMap(saved -> resolveSubmitRecipients(pool, saved)
+                .call(recipients -> notifyApprovers(saved, recipients))
+                // Email is fire-and-forget on the tenant pool so the response never waits on SMTP.
+                .invoke(recipients -> emailApprovers(pool, saved, recipients)
+                        .subscribe().with(ignored -> {}, err -> {}))
+                .replaceWith(saved))
             .flatMap(saved -> getOne(saved.getUniqId()));
+    }
+
+    /**
+     * Who to notify on submit: the approval flow's first pending approver(s) when a
+     * flow is active for mod18 + LeaveApplication, otherwise the applicant-chosen
+     * approver (fallback — today's behaviour when no flow is configured).
+     */
+    private Uni<List<String>> resolveSubmitRecipients(io.vertx.mutiny.sqlclient.SqlClient pool,
+                                                       LeaveApplication saved) {
+        return approvalFlowService.initialPendingApprovers(pool).map(flowApprovers -> {
+            if (flowApprovers != null && !flowApprovers.isEmpty()) {
+                return flowApprovers;
+            }
+            String chosen = saved.getApproverStaffId();
+            return (chosen == null || chosen.isBlank()) ? List.<String>of() : List.of(chosen);
+        });
     }
 
     private Uni<LeaveApplication> buildAndValidate(String action, LeaveApplicationDTO dto,
@@ -490,9 +560,8 @@ public class LeaveService {
                 truncate(remarks, LEN_LOG_REMARKS));
     }
 
-    private Uni<Void> notifyApprover(LeaveApplication e) {
-        String approver = e.getApproverStaffId();
-        if (approver == null || approver.isBlank()) {
+    private Uni<Void> notifyApprovers(LeaveApplication e, List<String> recipients) {
+        if (recipients == null || recipients.isEmpty()) {
             return Uni.createFrom().voidItem();
         }
         String who = (e.getStaffName() != null && !e.getStaffName().isBlank())
@@ -503,45 +572,61 @@ public class LeaveService {
         String desc = who + (cancel ? " has requested to cancel " : " has applied for ")
                 + nz(e.getLeaveType()) + " leave"
                 + periodText(e) + ". Please review and approve.";
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-                pool.withTransaction(tx ->
-                    notificationRepo.create(tx, MODULE_ID, NOTIF_TYPE_ADMIN,
-                            truncate(subject, LEN_NOTIF_SUBJECT), truncate(desc, LEN_NOTIF_DESC),
-                            approver, e.getStaffId(), String.valueOf(e.getUniqId()))))
-            .replaceWithVoid()
-            .onFailure().recoverWithItem((Void) null);
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool -> {
+            Uni<Void> chain = Uni.createFrom().voidItem();
+            for (String approver : recipients) {
+                if (approver == null || approver.isBlank()) continue;
+                chain = chain.flatMap(v -> pool.withTransaction(tx ->
+                        notificationRepo.create(tx, MODULE_ID, NOTIF_TYPE_ADMIN,
+                                truncate(subject, LEN_NOTIF_SUBJECT), truncate(desc, LEN_NOTIF_DESC),
+                                approver, e.getStaffId(), String.valueOf(e.getUniqId())))
+                    .replaceWithVoid());
+            }
+            return chain;
+        }).onFailure().recoverWithItem((Void) null);
     }
 
     /**
-     * Emails the approver the same "please review and approve" message as the in-app bell,
-     * gated by the NOTIFICATION-EMAIL parameter and the approver having an email on file.
-     * Best-effort: any failure is swallowed so a mail problem never affects the submission.
+     * Emails each pending approver the same "please review and approve" message as
+     * the in-app bell, gated once by the NOTIFICATION-EMAIL parameter (and per
+     * approver by having an email on file). Best-effort: any failure is swallowed
+     * so a mail problem never affects the submission.
      */
-    private Uni<Void> emailApprover(io.vertx.mutiny.sqlclient.Pool pool, LeaveApplication e) {
-        String approver = e.getApproverStaffId();
-        if (approver == null || approver.isBlank()) {
+    private Uni<Void> emailApprovers(io.vertx.mutiny.sqlclient.Pool pool, LeaveApplication e,
+                                     List<String> recipients) {
+        if (recipients == null || recipients.isEmpty()) {
             return Uni.createFrom().voidItem();
         }
         return systemParameterService.isNotificationEmailEnabled(pool).flatMap(enabled -> {
             if (!Boolean.TRUE.equals(enabled)) {
                 return Uni.createFrom().voidItem();
             }
-            return staffRepo.findByStaffId(pool, approver).flatMap(approverStaff -> {
-                String email = approverStaff != null ? approverStaff.getEmailCompany() : null;
-                if (email == null || email.isBlank()) {
-                    return Uni.createFrom().voidItem();
-                }
-                String who = (e.getStaffName() != null && !e.getStaffName().isBlank())
-                        ? e.getStaffName() : e.getStaffId();
-                String approverName = (approverStaff.getName() != null && !approverStaff.getName().isBlank())
-                        ? approverStaff.getName() : approver;
-                boolean cancel = ACTION_CANCEL.equals(e.getLeaveAction());
-                String subject = (cancel ? "Leave cancellation request from " : "Leave application from ")
-                        + who + " - " + nz(e.getLeaveType());
-                String html = LeaveEmailTemplate.buildSubmittedEmail(
-                        approverName, who, nz(e.getLeaveType()), periodText(e), cancel, e.getRemarks());
-                return emailNotificationService.sendReactive(email, subject, html).replaceWithVoid();
-            });
+            Uni<Void> chain = Uni.createFrom().voidItem();
+            for (String approver : recipients) {
+                if (approver == null || approver.isBlank()) continue;
+                chain = chain.flatMap(v -> emailOneApprover(pool, e, approver));
+            }
+            return chain;
+        }).onFailure().recoverWithItem((Void) null);
+    }
+
+    /** Sends the submit email to one approver; NOTIFICATION-EMAIL gating is done by the caller. */
+    private Uni<Void> emailOneApprover(io.vertx.mutiny.sqlclient.Pool pool, LeaveApplication e, String approver) {
+        return staffRepo.findByStaffId(pool, approver).flatMap(approverStaff -> {
+            String email = approverStaff != null ? approverStaff.getEmailCompany() : null;
+            if (email == null || email.isBlank()) {
+                return Uni.createFrom().voidItem();
+            }
+            String who = (e.getStaffName() != null && !e.getStaffName().isBlank())
+                    ? e.getStaffName() : e.getStaffId();
+            String approverName = (approverStaff.getName() != null && !approverStaff.getName().isBlank())
+                    ? approverStaff.getName() : approver;
+            boolean cancel = ACTION_CANCEL.equals(e.getLeaveAction());
+            String subject = (cancel ? "Leave cancellation request from " : "Leave application from ")
+                    + who + " - " + nz(e.getLeaveType());
+            String html = LeaveEmailTemplate.buildSubmittedEmail(
+                    approverName, who, nz(e.getLeaveType()), periodText(e), cancel, e.getRemarks());
+            return emailNotificationService.sendReactive(email, subject, html).replaceWithVoid();
         }).onFailure().recoverWithItem((Void) null);
     }
 

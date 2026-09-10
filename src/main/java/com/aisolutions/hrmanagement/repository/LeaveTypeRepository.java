@@ -1,7 +1,6 @@
 package com.aisolutions.hrmanagement.repository;
 
 import com.aisolutions.hrmanagement.dto.DropdownOptionDTO;
-import com.aisolutions.hrmanagement.entity.LeaveType;
 import com.aisolutions.hrmanagement.entity.LeaveTypeEntitlement;
 
 import io.smallrye.mutiny.Uni;

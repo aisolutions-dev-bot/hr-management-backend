@@ -2,8 +2,6 @@ package com.aisolutions.hrmanagement.repository;
 
 import io.smallrye.mutiny.Uni;
 import io.vertx.mutiny.mysqlclient.MySQLClient;
-import io.vertx.mutiny.sqlclient.Row;
-import io.vertx.mutiny.sqlclient.RowSet;
 import io.vertx.mutiny.sqlclient.SqlClient;
 import io.vertx.mutiny.sqlclient.Tuple;
 import jakarta.enterprise.context.ApplicationScoped;
