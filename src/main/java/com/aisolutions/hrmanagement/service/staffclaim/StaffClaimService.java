@@ -12,6 +12,7 @@ import com.aisolutions.hrmanagement.repository.StaffRepository;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
 import com.aisolutions.hrmanagement.service.SystemParameterService;
 import com.aisolutions.hrmanagement.service.attachment.AttachmentService;
+import com.aisolutions.hrmanagement.service.email.EmailNotificationService;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService.DeviceInfo;
 import com.aisolutions.hrmanagement.util.StringNormalizer;
@@ -102,6 +103,7 @@ public class StaffClaimService {
     @Inject StaffRepository staffRepo;
     @Inject SystemParameterService systemParameterService;
     @Inject CompanyPoolManager companyPoolManager;
+    @Inject EmailNotificationService emailNotificationService;
 
     // ─────────────────────────────────────────────────────────
     //  CREATE DRAFT
@@ -319,7 +321,9 @@ public class StaffClaimService {
                           UserActionLogService.Action.ADD,
                           "Submitted claim " + nz(dto.getClaimPeriod()) + " of amount "
                                   + plain(dto.getClaimAmount()), deviceInfo))
-                  .call(this::notifyClaimSubmitted);
+                  .call(this::notifyClaimSubmitted)
+                  // Email is fire-and-forget (never waits on SMTP); reuses this method's pool.
+                  .invoke(dto -> emailClaimSubmitted(pool, dto).subscribe().with(ignored -> {}, err -> {}));
             }));
     }
 
@@ -476,6 +480,11 @@ public class StaffClaimService {
                             + (appealDescription != null && !appealDescription.isBlank()
                                     ? " with appeal" : ""), deviceInfo))
             .call(this::notifyClaimResubmitted)
+            // Email is fire-and-forget; pool is resolved here while still attached (see
+            // emailClaimSubmitted's javadoc) so the detached send needs no currentUserService call.
+            .flatMap(dto -> companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+                    .invoke(pool -> emailClaimResubmitted(pool, dto).subscribe().with(ignored -> {}, err -> {}))
+                    .replaceWith(dto))
         );
     }
 
@@ -516,6 +525,11 @@ public class StaffClaimService {
             .flatMap(v -> recalcAndRollup(headerId, actor))
             .flatMap(h -> getWithLines(headerId))
             .call(this::notifyClaimResubmitted)
+            // Email is fire-and-forget; pool is resolved here while still attached (see
+            // emailClaimSubmitted's javadoc) so the detached send needs no currentUserService call.
+            .flatMap(result -> companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+                    .invoke(pool -> emailClaimResubmitted(pool, result).subscribe().with(ignored -> {}, err -> {}))
+                    .replaceWith(result))
         );
     }
 
@@ -616,7 +630,13 @@ public class StaffClaimService {
                 }))
                 .call(saved -> (becameApproved && saved != null)
                         ? notifyClaimApproved(saved)
-                        : Uni.createFrom().voidItem());
+                        : Uni.createFrom().voidItem())
+                // Email is fire-and-forget (never waits on SMTP); reuses this method's pool.
+                .invoke(saved -> {
+                    if (becameApproved && saved != null) {
+                        emailClaimApproved(pool, saved).subscribe().with(ignored -> {}, err -> {});
+                    }
+                });
             }));
     }
 
@@ -738,6 +758,135 @@ public class StaffClaimService {
         .onFailure().recoverWithItem((Void) null);
     }
 
+    /**
+     * Emails the HR approver named by HR-ADMIN-APPRV-IN-CHARGE the same "claim submitted"
+     * message as the in-app bell, gated by the tenant NOTIFICATION-EMAIL parameter and the
+     * approver having an email on file. Best-effort: any failure is swallowed.
+     *
+     * <p>Takes the already-resolved tenant {@code pool} instead of resolving one via
+     * {@code currentUserService} — this runs detached (fire-and-forget), and
+     * {@code currentUserService} needs the live request context, which is gone by then.
+     */
+    private Uni<Void> emailClaimSubmitted(io.vertx.mutiny.sqlclient.Pool pool, StaffClaimDTO claim) {
+        String submitter = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
+        return systemParameterService.loadParameter(pool, PARAM_HR_APPROVER)
+            .onFailure().recoverWithItem((String) null)
+            .flatMap(recipient -> {
+                if (recipient == null || recipient.isBlank()) {
+                    return Uni.createFrom().voidItem();
+                }
+                return systemParameterService.isNotificationEmailEnabled(pool).flatMap(enabled -> {
+                    if (!Boolean.TRUE.equals(enabled)) {
+                        return Uni.createFrom().voidItem();
+                    }
+                    return staffRepo.findByStaffId(pool, recipient).flatMap(approverStaff -> {
+                        String email = approverStaff != null ? approverStaff.getEmailCompany() : null;
+                        if (email == null || email.isBlank()) {
+                            return Uni.createFrom().voidItem();
+                        }
+                        return staffRepo.findNameByStaffId(pool, submitter)
+                            .onFailure().recoverWithItem((String) null)
+                            .flatMap(name -> loadBaseCurrencySafe(pool).flatMap(baseCcy -> {
+                                String who = (name != null && !name.isBlank()) ? name : submitter;
+                                String approverName = (approverStaff.getName() != null
+                                        && !approverStaff.getName().isBlank())
+                                        ? approverStaff.getName() : recipient;
+                                String subject = "New staff claim submitted by " + who
+                                        + " - " + nz(claim.getClaimPeriod());
+                                String html = ClaimEmailTemplate.buildSubmittedEmail(
+                                        approverName, who, nz(claim.getClaimPeriod()),
+                                        money(baseCcy, claim.getClaimAmount()));
+                                return emailNotificationService.sendReactive(email, subject, html)
+                                        .replaceWithVoid();
+                            }));
+                    });
+                });
+            })
+            .onFailure().invoke(err -> System.err.println(
+                    "[Email] claim-submitted send failed for claim " + claim.getUniqId() + ": " + err))
+            .onFailure().recoverWithItem((Void) null);
+    }
+
+    /**
+     * Emails the HR approver named by HR-ADMIN-APPRV-IN-CHARGE that a previously-rejected
+     * receipt is back for review. Mirrors {@link #emailClaimSubmitted}; gated by the tenant
+     * NOTIFICATION-EMAIL parameter and the approver having an email on file. Takes the
+     * already-resolved tenant {@code pool} — see {@link #emailClaimSubmitted} for why.
+     */
+    private Uni<Void> emailClaimResubmitted(io.vertx.mutiny.sqlclient.Pool pool, StaffClaimDTO claim) {
+        String submitter = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
+        return systemParameterService.loadParameter(pool, PARAM_HR_APPROVER)
+            .onFailure().recoverWithItem((String) null)
+            .flatMap(recipient -> {
+                if (recipient == null || recipient.isBlank()) {
+                    return Uni.createFrom().voidItem();
+                }
+                return systemParameterService.isNotificationEmailEnabled(pool).flatMap(enabled -> {
+                    if (!Boolean.TRUE.equals(enabled)) {
+                        return Uni.createFrom().voidItem();
+                    }
+                    return staffRepo.findByStaffId(pool, recipient).flatMap(approverStaff -> {
+                        String email = approverStaff != null ? approverStaff.getEmailCompany() : null;
+                        if (email == null || email.isBlank()) {
+                            return Uni.createFrom().voidItem();
+                        }
+                        return staffRepo.findNameByStaffId(pool, submitter)
+                            .onFailure().recoverWithItem((String) null)
+                            .flatMap(name -> {
+                                String who = (name != null && !name.isBlank()) ? name : submitter;
+                                String approverName = (approverStaff.getName() != null
+                                        && !approverStaff.getName().isBlank())
+                                        ? approverStaff.getName() : recipient;
+                                String subject = "Receipt resubmitted for review by " + who
+                                        + " - " + nz(claim.getClaimPeriod());
+                                String html = ClaimEmailTemplate.buildResubmittedEmail(
+                                        approverName, who, nz(claim.getClaimPeriod()));
+                                return emailNotificationService.sendReactive(email, subject, html)
+                                        .replaceWithVoid();
+                            });
+                    });
+                });
+            })
+            .onFailure().invoke(err -> System.err.println(
+                    "[Email] claim-resubmitted send failed for claim " + claim.getUniqId() + ": " + err))
+            .onFailure().recoverWithItem((Void) null);
+    }
+
+    /**
+     * Emails the claimant that their claim is wholly approved, gated by the tenant
+     * NOTIFICATION-EMAIL parameter and the claimant having an email on file. Best-effort:
+     * any failure is swallowed. Takes the already-resolved tenant {@code pool} — see
+     * {@link #emailClaimSubmitted} for why.
+     */
+    private Uni<Void> emailClaimApproved(io.vertx.mutiny.sqlclient.Pool pool, StaffClaim claim) {
+        String claimant = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
+        if (claimant == null || claimant.isBlank()) {
+            return Uni.createFrom().voidItem();
+        }
+        return systemParameterService.isNotificationEmailEnabled(pool).flatMap(enabled -> {
+                if (!Boolean.TRUE.equals(enabled)) {
+                    return Uni.createFrom().voidItem();
+                }
+                return staffRepo.findByStaffId(pool, claimant).flatMap(staff -> {
+                    String email = staff != null ? staff.getEmailCompany() : null;
+                    if (email == null || email.isBlank()) {
+                        return Uni.createFrom().voidItem();
+                    }
+                    String name = (staff.getName() != null && !staff.getName().isBlank())
+                            ? staff.getName() : claimant;
+                    return loadBaseCurrencySafe(pool).flatMap(baseCcy -> {
+                        String subject = "Your " + nz(claim.getClaimPeriod()) + " claim is approved.";
+                        String html = ClaimEmailTemplate.buildApprovedEmail(
+                                name, nz(claim.getClaimPeriod()), money(baseCcy, claim.getClaimAmount()));
+                        return emailNotificationService.sendReactive(email, subject, html).replaceWithVoid();
+                    });
+                });
+            })
+            .onFailure().invoke(err -> System.err.println(
+                    "[Email] claim-approved send failed for claim " + claim.getUniqId() + ": " + err))
+            .onFailure().recoverWithItem((Void) null);
+    }
+
     private Uni<Void> createNotification(String notificationType, String subject, String desc,
                                          String notifyStaff, String entryStaff, String referenceNo) {
         return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
@@ -756,6 +905,16 @@ public class StaffClaimService {
     /** Base currency, or null when it can't be read — the amount then prints without a code. */
     private Uni<String> loadBaseCurrencySafe() {
         return systemParameterService.loadBaseCurrency().onFailure().recoverWithItem((String) null);
+    }
+
+    /**
+     * As {@link #loadBaseCurrencySafe()} but on an already-resolved tenant pool — required
+     * for the detached email methods, since {@link SystemParameterService#loadBaseCurrency()}
+     * falls back to {@code currentUserService} on a cache miss, which fails once detached.
+     */
+    private Uni<String> loadBaseCurrencySafe(io.vertx.mutiny.sqlclient.Pool pool) {
+        return systemParameterService.loadParameter(pool, SystemParameterService.PARAM_BASE_CURRENCY)
+                .onFailure().recoverWithItem((String) null);
     }
 
     private static String nz(String s) {
