@@ -26,6 +26,9 @@ dependencies {
     implementation("io.quarkus:quarkus-arc")
     implementation("io.quarkus:quarkus-rest")
     implementation("io.quarkus:quarkus-rest-jackson")
+    // Generates an OpenAPI spec from the JAX-RS annotations below, served at /q/openapi
+    // and /q/swagger-ui. The docs site's API reference section is generated from this.
+    implementation("io.quarkus:quarkus-smallrye-openapi")
     implementation("io.quarkus:quarkus-rest-client-jackson")
     implementation("io.quarkus:quarkus-hibernate-reactive-panache")
     implementation("io.quarkus:quarkus-reactive-mysql-client")
