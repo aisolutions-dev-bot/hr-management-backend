@@ -14,6 +14,7 @@ import com.aisolutions.hrmanagement.service.SystemParameterService;
 import com.aisolutions.hrmanagement.service.attachment.AttachmentService;
 import com.aisolutions.hrmanagement.service.email.EmailNotificationService;
 import com.aisolutions.hrmanagement.service.sms.SmsNotificationService;
+import com.aisolutions.hrmanagement.service.whatsapp.WhatsappNotificationService;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService.DeviceInfo;
 import com.aisolutions.hrmanagement.util.StringNormalizer;
@@ -106,6 +107,7 @@ public class StaffClaimService {
     @Inject CompanyPoolManager companyPoolManager;
     @Inject EmailNotificationService emailNotificationService;
     @Inject SmsNotificationService smsNotificationService;
+    @Inject WhatsappNotificationService whatsappNotificationService;
 
     // ─────────────────────────────────────────────────────────
     //  CREATE DRAFT
@@ -328,6 +330,7 @@ public class StaffClaimService {
                   .invoke(dto -> {
                       emailClaimSubmitted(pool, dto).subscribe().with(ignored -> {}, err -> {});
                       smsClaimSubmitted(pool, dto).subscribe().with(ignored -> {}, err -> {});
+                      whatsappClaimSubmitted(pool, dto, "submitted").subscribe().with(ignored -> {}, err -> {});
                   });
             }));
     }
@@ -491,6 +494,7 @@ public class StaffClaimService {
                     .invoke(pool -> {
                         emailClaimResubmitted(pool, dto).subscribe().with(ignored -> {}, err -> {});
                         smsClaimResubmitted(pool, dto).subscribe().with(ignored -> {}, err -> {});
+                        whatsappClaimSubmitted(pool, dto, "resubmitted").subscribe().with(ignored -> {}, err -> {});
                     })
                     .replaceWith(dto))
         );
@@ -539,6 +543,7 @@ public class StaffClaimService {
                     .invoke(pool -> {
                         emailClaimResubmitted(pool, result).subscribe().with(ignored -> {}, err -> {});
                         smsClaimResubmitted(pool, result).subscribe().with(ignored -> {}, err -> {});
+                        whatsappClaimSubmitted(pool, result, "resubmitted").subscribe().with(ignored -> {}, err -> {});
                     })
                     .replaceWith(result))
         );
@@ -647,6 +652,7 @@ public class StaffClaimService {
                     if (becameApproved && saved != null) {
                         emailClaimApproved(pool, saved).subscribe().with(ignored -> {}, err -> {});
                         smsClaimApproved(pool, saved).subscribe().with(ignored -> {}, err -> {});
+                        whatsappClaimApproved(pool, saved).subscribe().with(ignored -> {}, err -> {});
                     }
                 });
             }));
@@ -870,6 +876,59 @@ public class StaffClaimService {
     }
 
     /**
+     * WhatsApp counterpart of {@link #smsClaimSubmitted} / {@link #smsClaimResubmitted} — same
+     * approver recipient, gated by NOTIFICATION-WHATSAPP and the approver having a mobile number
+     * on file. {@code action} = "submitted" on first submit, "resubmitted" when a fixed receipt
+     * is back for review.
+     */
+    private Uni<Void> whatsappClaimSubmitted(io.vertx.mutiny.sqlclient.Pool pool, StaffClaimDTO claim,
+            String action) {
+        return systemParameterService.loadParameter(pool, PARAM_HR_APPROVER)
+            .onFailure().recoverWithItem((String) null)
+            .flatMap(recipient -> {
+                if (recipient == null || recipient.isBlank()) {
+                    System.err.println("[WhatsApp] claim-" + action + " skipped for claim " + claim.getUniqId()
+                            + ": " + PARAM_HR_APPROVER + " not configured");
+                    return Uni.createFrom().voidItem();
+                }
+                return systemParameterService.isNotificationWhatsappEnabled(pool).flatMap(enabled -> {
+                    if (!Boolean.TRUE.equals(enabled)) {
+                        System.err.println("[WhatsApp] claim-" + action + " skipped for claim " + claim.getUniqId()
+                                + ": NOTIFICATION-WHATSAPP is off");
+                        return Uni.createFrom().voidItem();
+                    }
+                    return staffRepo.findByStaffId(pool, recipient).flatMap(approverStaff -> {
+                        String mobile = approverStaff != null ? approverStaff.getTelMobile() : null;
+                        if (mobile == null || mobile.isBlank()) {
+                            System.err.println("[WhatsApp] claim-" + action + " skipped for claim "
+                                    + claim.getUniqId() + ": approver " + recipient + " has no TelMobile");
+                            return Uni.createFrom().voidItem();
+                        }
+                        String approverName = (approverStaff.getName() != null
+                                && !approverStaff.getName().isBlank()) ? approverStaff.getName() : recipient;
+                        String submitter = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
+                        return staffRepo.findNameByStaffId(pool, submitter)
+                            .onFailure().recoverWithItem((String) null)
+                            .flatMap(name -> loadBaseCurrencySafe(pool).flatMap(baseCcy -> {
+                                String who = (name != null && !name.isBlank()) ? name : submitter;
+                                System.err.println("[WhatsApp] claim-" + action + " sending to " + mobile
+                                        + " for claim " + claim.getUniqId());
+                                return whatsappNotificationService.sendClaimSubmitted(mobile, approverName, who,
+                                        nz(claim.getClaimPeriod()), money(baseCcy, claim.getClaimAmount()), action)
+                                    .invoke(sent -> System.err.println("[WhatsApp] claim-" + action + " send "
+                                            + (sent ? "OK" : "FAILED") + " to " + mobile
+                                            + " for claim " + claim.getUniqId()))
+                                    .replaceWithVoid();
+                            }));
+                    });
+                });
+            })
+            .onFailure().invoke(err -> System.err.println(
+                    "[WhatsApp] claim-" + action + " send failed for claim " + claim.getUniqId() + ": " + err))
+            .onFailure().recoverWithItem((Void) null);
+    }
+
+    /**
      * Emails the HR approver named by HR-ADMIN-APPRV-IN-CHARGE that a previously-rejected
      * receipt is back for review. Mirrors {@link #emailClaimSubmitted}; gated by the tenant
      * NOTIFICATION-EMAIL parameter and the approver having an email on file. Takes the
@@ -1034,6 +1093,46 @@ public class StaffClaimService {
             });
         }).onFailure().invoke(err -> System.err.println(
                 "[SMS] claim-approved send failed for claim " + claim.getUniqId() + ": " + err))
+          .onFailure().recoverWithItem((Void) null);
+    }
+
+    /**
+     * WhatsApp counterpart of {@link #smsClaimApproved} — same claimant recipient, gated by
+     * NOTIFICATION-WHATSAPP and the claimant having a mobile number on file.
+     */
+    private Uni<Void> whatsappClaimApproved(io.vertx.mutiny.sqlclient.Pool pool, StaffClaim claim) {
+        String claimant = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
+        if (claimant == null || claimant.isBlank()) {
+            return Uni.createFrom().voidItem();
+        }
+        return systemParameterService.isNotificationWhatsappEnabled(pool).flatMap(enabled -> {
+            if (!Boolean.TRUE.equals(enabled)) {
+                System.err.println("[WhatsApp] claim-approved skipped for claim " + claim.getUniqId()
+                        + ": NOTIFICATION-WHATSAPP is off");
+                return Uni.createFrom().voidItem();
+            }
+            return staffRepo.findByStaffId(pool, claimant).flatMap(staff -> {
+                String mobile = staff != null ? staff.getTelMobile() : null;
+                if (mobile == null || mobile.isBlank()) {
+                    System.err.println("[WhatsApp] claim-approved skipped for claim " + claim.getUniqId()
+                            + ": claimant " + claimant + " has no TelMobile");
+                    return Uni.createFrom().voidItem();
+                }
+                String name = (staff.getName() != null && !staff.getName().isBlank())
+                        ? staff.getName() : claimant;
+                return loadBaseCurrencySafe(pool).flatMap(baseCcy -> {
+                    System.err.println("[WhatsApp] claim-approved sending to " + mobile
+                            + " for claim " + claim.getUniqId());
+                    return whatsappNotificationService.sendClaimDecision(mobile, name,
+                            nz(claim.getClaimPeriod()), money(baseCcy, claim.getClaimAmount()), "approved", "-")
+                        .invoke(sent -> System.err.println("[WhatsApp] claim-approved send "
+                                + (sent ? "OK" : "FAILED") + " to " + mobile
+                                + " for claim " + claim.getUniqId()))
+                        .replaceWithVoid();
+                });
+            });
+        }).onFailure().invoke(err -> System.err.println(
+                "[WhatsApp] claim-approved send failed for claim " + claim.getUniqId() + ": " + err))
           .onFailure().recoverWithItem((Void) null);
     }
 
