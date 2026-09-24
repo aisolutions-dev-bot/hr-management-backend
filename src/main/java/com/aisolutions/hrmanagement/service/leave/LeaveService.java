@@ -381,8 +381,12 @@ public class LeaveService {
      */
     public Uni<ApprovalFlowDTO> getApprovalFlow() {
         return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
-            .flatMap(pool -> approvalFlowService.flowChain(pool))
+            .flatMap(pool -> applicantDepartment(pool)
+                .flatMap(applicantDept -> approvalFlowService.flowChain(pool, applicantDept)))
             .map(chain -> {
+                // Tiers arrive already resolved: a DEPARTMENT tier is either the concrete dept
+                // in-charge (shown like any staff approver) or skipped, so each tier here names a
+                // real person.
                 List<ApprovalFlowDTO.Tier> tiers = chain.tiers().stream()
                     .map(t -> new ApprovalFlowDTO.Tier(t.level(), t.staffId(),
                             (t.staffName() != null && !t.staffName().isBlank()) ? t.staffName() : t.staffId(),
@@ -390,6 +394,19 @@ public class LeaveService {
                     .toList();
                 return new ApprovalFlowDTO(chain.active(), chain.mode(), tiers);
             });
+    }
+
+    /** The current applicant's department (for resolving DEPARTMENT tiers on the apply form),
+     *  or null when it cannot be determined — the flow then shows a role label for such tiers. */
+    private Uni<String> applicantDepartment(io.vertx.mutiny.sqlclient.SqlClient pool) {
+        return currentUserService.getCurrentUser().flatMap(user -> {
+            String staffId = (user != null && user.getStaffId() != null
+                    && !CurrentUserService.SYSTEM_USER.equals(user.getStaffId())) ? user.getStaffId() : null;
+            if (staffId == null) {
+                return Uni.createFrom().nullItem();
+            }
+            return staffRepo.findByStaffId(pool, staffId).map(s -> s != null ? s.getDepartment() : null);
+        });
     }
 
     /** The approval trail for a leave, read from the m07ApprovalAction log (or the leave's own fields for legacy records). */
@@ -409,30 +426,34 @@ public class LeaveService {
             return Uni.createFrom().failure(new IllegalArgumentException("Leave Type is required"));
         }
 
+        // Load the applicant first: the flow decision is department-aware (a DEPARTMENT tier
+        // resolves to that department's in-charge), so the applicant's department is needed
+        // before we know whether a usable flow governs this leave.
         return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
-            .flatMap(pool -> approvalFlowService.initialPendingApprovers(pool).flatMap(flowApprovers -> {
-                // A configured flow decides the approver, so the applicant need not pick one; only the
-                // no-flow (fallback) path still requires a chosen approver. When a flow is active we seed
-                // the approver field with its first pending tier (a non-null pointer + fallback filter).
-                boolean flowActive = flowApprovers != null && !flowApprovers.isEmpty();
-                String chosen = dto.getApproverStaffId();
-                if (chosen == null || chosen.isBlank()) {
-                    if (flowActive) {
-                        dto.setApproverStaffId(flowApprovers.get(0));
-                    } else {
-                        return Uni.createFrom().<LeaveApplicationDTO>failure(
-                                new IllegalArgumentException("An approver must be selected"));
-                    }
-                }
-                return resolveStaffId(dto.getStaffId())
-                    .flatMap(staffId -> staffRepo.findByStaffId(pool, staffId)
-                        .flatMap(staff -> buildAndValidate(action, dto, staffId, staff, pool)
+            .flatMap(pool -> resolveStaffId(dto.getStaffId())
+                .flatMap(staffId -> staffRepo.findByStaffId(pool, staffId).flatMap(staff -> {
+                    String applicantDept = staff != null ? staff.getDepartment() : null;
+                    return approvalFlowService.resolvedInitialApprovers(pool, applicantDept).flatMap(flowApprovers -> {
+                        // A usable flow (its tiers resolve to real approvers) decides the approver, so the
+                        // applicant need not pick one. Only when no flow is usable — none configured, or every
+                        // tier skipped because a department has no in-charge — must the applicant choose one.
+                        boolean flowActive = flowApprovers != null && !flowApprovers.isEmpty();
+                        String chosen = dto.getApproverStaffId();
+                        if (chosen == null || chosen.isBlank()) {
+                            if (flowActive) {
+                                dto.setApproverStaffId(flowApprovers.get(0));
+                            } else {
+                                return Uni.createFrom().<LeaveApplicationDTO>failure(
+                                        new IllegalArgumentException("An approver must be selected"));
+                            }
+                        }
+                        return buildAndValidate(action, dto, staffId, staff, pool)
                             .flatMap(entity -> ACTION_APPLY.equals(entity.getLeaveAction())
-                                    ? validateApplyEligibility(pool, staff, entity.getLeaveType())
-                                            .replaceWith(entity)
+                                    ? validateApplyEligibility(pool, staff, entity.getLeaveType()).replaceWith(entity)
                                     : Uni.createFrom().item(entity))
-                            .flatMap(entity -> saveAndNotify(pool, entity, deviceInfo))));
-            }));
+                            .flatMap(entity -> saveAndNotify(pool, entity, deviceInfo));
+                    });
+                })));
     }
 
     private Uni<LeaveApplicationDTO> saveAndNotify(io.vertx.mutiny.sqlclient.Pool pool,
@@ -440,6 +461,7 @@ public class LeaveService {
         return pool.withTransaction(tx -> leaveRepo.save(tx, entity)
                 // Freeze the current flow onto this leave so later flow edits won't affect it.
                 .flatMap(saved -> approvalFlowService.snapshotAtSubmit(tx, saved.getUniqId(),
+                            saved.getDepartment(),
                             saved.getEntryStaff() != null ? saved.getEntryStaff() : saved.getStaffId(),
                             DateUtil.nowSGT())
                         .replaceWith(saved)))
@@ -464,7 +486,9 @@ public class LeaveService {
      */
     private Uni<List<String>> resolveSubmitRecipients(io.vertx.mutiny.sqlclient.SqlClient pool,
                                                        LeaveApplication saved) {
-        return approvalFlowService.initialPendingApprovers(pool).map(flowApprovers -> {
+        // Read from the just-frozen snapshot (not live config) so DEPARTMENT tiers resolved
+        // at submit are honoured and the notification matches the flow that will actually run.
+        return approvalFlowService.pendingApproversFromSnapshot(pool, saved.getUniqId()).map(flowApprovers -> {
             if (flowApprovers != null && !flowApprovers.isEmpty()) {
                 return flowApprovers;
             }

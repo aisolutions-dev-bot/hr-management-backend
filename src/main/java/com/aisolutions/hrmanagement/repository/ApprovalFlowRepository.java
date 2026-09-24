@@ -25,8 +25,13 @@ public class ApprovalFlowRepository {
     /** Flow header: one row per module + screen. */
     public record Header(long refId, String moduleId, String screenType, String mode, String status) {}
 
-    /** One ordered tier and its single approver. */
-    public record Tier(int level, String staffId, String staffName, String dept, String status) {}
+    /**
+     * One ordered tier. {@code approverType} (STAFF | DEPARTMENT | PROJECT) says how the
+     * approver is chosen: STAFF carries a fixed {@code staffId}; DEPARTMENT/PROJECT resolve
+     * to the document's department/project in-charge at submit (then frozen into the snapshot
+     * as a concrete staffId), so their raw {@code staffId} here is blank until resolved.
+     */
+    public record Tier(int level, String approverType, String staffId, String staffName, String dept, String status) {}
 
     /** One logged decision (APPROVE/REJECT). {@code level} may be null for a bare fallback row. */
     public record Action(Integer level, String action, String reason,
@@ -49,12 +54,28 @@ public class ApprovalFlowRepository {
     /** The ON tiers for a header, ordered by level (OFF tiers are skipped = compressed out). */
     public Uni<List<Tier>> findOnTiers(SqlClient client, long referenceId) {
         return client.preparedQuery(
-                "SELECT d.ApprovalLevel, d.StaffId, d.Status, s.Name AS StaffName, s.Department AS StaffDept " +
+                "SELECT d.ApprovalLevel, d.ApproverType, d.StaffId, d.Status, s.Name AS StaffName, s.Department AS StaffDept " +
                 "FROM m07ApprovalManagementDet d LEFT JOIN m03Staff s ON s.StaffId = d.StaffId " +
                 "WHERE d.ReferenceID = ? AND d.Status = 'ON' ORDER BY d.ApprovalLevel")
             .execute(Tuple.of(referenceId))
             .map(this::toTiers)
             .onFailure().recoverWithItem(List.of());
+    }
+
+    /**
+     * The in-charge staff id configured for a department (m01Department.InChargeId), or
+     * null when the department is unknown or has no in-charge. Single-table lookup keyed by
+     * DepartmentId (= m03Staff.Department), so no cross-collation join is involved.
+     */
+    public Uni<String> findDepartmentInCharge(SqlClient client, String departmentId) {
+        if (departmentId == null || departmentId.isBlank()) {
+            return Uni.createFrom().nullItem();
+        }
+        return client.preparedQuery(
+                "SELECT InChargeId FROM m01Department WHERE DepartmentId = ? LIMIT 1")
+            .execute(Tuple.of(departmentId))
+            .map(rows -> rows.iterator().hasNext() ? rows.iterator().next().getString("InChargeId") : null)
+            .onFailure().recoverWithItem((String) null);
     }
 
     /** The action log for one document, oldest first. */
@@ -109,7 +130,8 @@ public class ApprovalFlowRepository {
         List<Tier> tiers = new ArrayList<>();
         for (Row row : rows) {
             if (mode == null) mode = row.getString("ApprovalMode");
-            tiers.add(new Tier(row.getInteger("ApprovalLevel"), row.getString("StaffId"),
+            // Snapshot rows always carry a concrete resolved approver, so their type is STAFF.
+            tiers.add(new Tier(row.getInteger("ApprovalLevel"), "STAFF", row.getString("StaffId"),
                     row.getString("StaffName"), row.getString("StaffDept"), "ON"));
         }
         return new Snapshot(mode, tiers);
@@ -125,8 +147,9 @@ public class ApprovalFlowRepository {
     private List<Tier> toTiers(RowSet<Row> rows) {
         List<Tier> result = new ArrayList<>();
         for (Row row : rows) {
-            result.add(new Tier(row.getInteger("ApprovalLevel"), row.getString("StaffId"),
-                    row.getString("StaffName"), row.getString("StaffDept"), row.getString("Status")));
+            result.add(new Tier(row.getInteger("ApprovalLevel"), row.getString("ApproverType"),
+                    row.getString("StaffId"), row.getString("StaffName"),
+                    row.getString("StaffDept"), row.getString("Status")));
         }
         return result;
     }

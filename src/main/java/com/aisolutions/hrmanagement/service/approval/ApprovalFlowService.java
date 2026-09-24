@@ -12,6 +12,7 @@ import io.smallrye.mutiny.Uni;
 import io.vertx.mutiny.sqlclient.SqlClient;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import lombok.extern.slf4j.Slf4j;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -24,6 +25,7 @@ import java.util.List;
  * leave falls back to the applicant-chosen approver.
  */
 @ApplicationScoped
+@Slf4j
 public class ApprovalFlowService {
 
     public static final String MODULE_ID   = "mod18";
@@ -32,6 +34,12 @@ public class ApprovalFlowService {
     private static final String MODE_SEQUENTIAL = "SEQUENTIAL";
     private static final String ACT_APPROVE = "APPROVE";
     private static final String ACT_REJECT  = "REJECT";
+
+    // Tier approver types. STAFF names a person; DEPARTMENT resolves to the applicant's
+    // department in-charge; PROJECT has no meaning for leave (no project).
+    private static final String TYPE_STAFF = "STAFF";
+    private static final String TYPE_DEPARTMENT = "DEPARTMENT";
+    private static final String TYPE_PROJECT = "PROJECT";
 
     private static final String STATUS_APPROVED = "APPROVED";
     private static final String STATUS_REJECTED = "REJECTED";
@@ -58,19 +66,63 @@ public class ApprovalFlowService {
 
     /**
      * Freezes the current live ON tiers onto a document at submit time (one snapshot row
-     * per tier). No-op when no flow is active. Runs on the submit transaction so the
-     * snapshot commits atomically with the leave.
+     * per tier). DEPARTMENT tiers are resolved to the applicant's department in-charge and
+     * frozen as concrete approvers, so the whole downstream engine stays staff-id based and
+     * later flow edits never affect an in-flight leave. No-op when no flow is active or every
+     * tier resolves away. Runs on the submit transaction so the snapshot commits atomically
+     * with the leave.
      */
-    public Uni<Void> snapshotAtSubmit(SqlClient tx, long leaveId, String actor, LocalDateTime now) {
+    public Uni<Void> snapshotAtSubmit(SqlClient tx, long leaveId, String applicantDept,
+                                      String actor, LocalDateTime now) {
         return flowRepo.findHeader(tx, MODULE_ID, SCREEN_TYPE).flatMap(header -> {
             boolean on = header != null && "ON".equalsIgnoreCase(header.status());
             if (!on) {
                 return Uni.createFrom().voidItem();
             }
-            return flowRepo.findOnTiers(tx, header.refId()).flatMap(tiers ->
-                tiers.isEmpty()
+            return flowRepo.findOnTiers(tx, header.refId())
+                .flatMap(tiers -> resolveTiersForSnapshot(tx, tiers, applicantDept))
+                .flatMap(resolved -> resolved.isEmpty()
                     ? Uni.createFrom().voidItem()
-                    : flowRepo.insertSnapshot(tx, MODULE_ID, SCREEN_TYPE, leaveId, header.mode(), tiers, actor, now));
+                    : flowRepo.insertSnapshot(tx, MODULE_ID, SCREEN_TYPE, leaveId, header.mode(), resolved, actor, now));
+        });
+    }
+
+    /**
+     * Turns the configured ON tiers into the concrete approver list to freeze:
+     *  - STAFF keeps its approver;
+     *  - DEPARTMENT becomes the applicant department's in-charge — dropped (with a warning)
+     *    when the department has no in-charge, so the flow never freezes an un-actionable tier;
+     *  - PROJECT is dropped (a leave carries no project to resolve against).
+     * Original tier levels are preserved (OFF-tier compression already leaves gaps), and the
+     * department in-charge is looked up once since every DEPARTMENT tier shares the applicant's dept.
+     */
+    private Uni<List<Tier>> resolveTiersForSnapshot(SqlClient client, List<Tier> tiers, String applicantDept) {
+        boolean needsDept = tiers.stream().anyMatch(t -> TYPE_DEPARTMENT.equalsIgnoreCase(t.approverType()));
+        Uni<String> inChargeUni = needsDept
+            ? flowRepo.findDepartmentInCharge(client, applicantDept)
+            : Uni.createFrom().nullItem();
+        return inChargeUni.map(deptInCharge -> {
+            List<Tier> resolved = new ArrayList<>();
+            for (Tier t : tiers) {
+                String type = t.approverType() == null ? TYPE_STAFF : t.approverType().toUpperCase();
+                String approver;
+                if (TYPE_DEPARTMENT.equals(type)) {
+                    approver = deptInCharge;
+                } else if (TYPE_PROJECT.equals(type)) {
+                    approver = null;   // leave has no project — resolves to nothing
+                } else {
+                    approver = t.staffId();
+                }
+                if (approver == null || approver.isBlank()) {
+                    if (!TYPE_STAFF.equals(type)) {
+                        log.warn("Dropping unresolved {} tier (level {}) from leave approval snapshot "
+                                + "(applicant dept={}): no approver could be resolved", type, t.level(), applicantDept);
+                    }
+                    continue;
+                }
+                resolved.add(new Tier(t.level(), TYPE_STAFF, approver, null, null, "ON"));
+            }
+            return resolved;
         });
     }
 
@@ -91,34 +143,91 @@ public class ApprovalFlowService {
     /**
      * The flow chain to show the applicant on the apply form: the ordered ON tiers
      * and their approvers when a flow is active, else an inactive chain (the
-     * applicant then picks their own approver).
+     * applicant then picks their own approver). A DEPARTMENT tier is resolved to the
+     * applicant's actual department in-charge (name + dept) so the preview shows the
+     * real person, the same as a fixed staff approver — mirroring what will be frozen
+     * at submit. PROJECT tiers are hidden (a leave carries no project to resolve against).
      */
-    public Uni<FlowChain> flowChain(SqlClient pool) {
+    public Uni<FlowChain> flowChain(SqlClient pool, String applicantDept) {
         return flowRepo.findHeader(pool, MODULE_ID, SCREEN_TYPE).flatMap(header -> {
             boolean on = header != null && "ON".equalsIgnoreCase(header.status());
             if (!on) {
                 return Uni.createFrom().item(
                         new FlowChain(false, header != null ? header.mode() : null, List.of()));
             }
-            return flowRepo.findOnTiers(pool, header.refId())
-                    .map(tiers -> new FlowChain(!tiers.isEmpty(), header.mode(), tiers));
+            return flowRepo.findOnTiers(pool, header.refId()).flatMap(tiers -> {
+                List<Tier> shown = tiers.stream()
+                        .filter(t -> !TYPE_PROJECT.equalsIgnoreCase(t.approverType()))
+                        .toList();
+                return resolveTiersForDisplay(pool, shown, applicantDept)
+                        .map(resolved -> new FlowChain(!resolved.isEmpty(), header.mode(), resolved));
+            });
         });
     }
 
     /**
-     * The staff ids that must be notified when a leave is first submitted under a
-     * flow: the first pending tier (SEQUENTIAL) or every ON tier (PARALLEL).
-     * Empty when there is no active flow — the caller then falls back to the
-     * applicant-chosen approver.
+     * Resolves DEPARTMENT tiers to the applicant's department in-charge as a concrete
+     * staff (id + name + dept) so the apply-form preview renders them like any staff
+     * approver. A tier whose department has no in-charge is SKIPPED (dropped), exactly as
+     * it will be at submit — so the preview matches the tiers that will actually run, and an
+     * empty result makes the form fall back to letting the applicant pick an approver. The
+     * in-charge is looked up once — every DEPARTMENT tier shares the applicant's department.
      */
-    public Uni<List<String>> initialPendingApprovers(SqlClient pool) {
+    private Uni<List<Tier>> resolveTiersForDisplay(SqlClient pool, List<Tier> tiers, String applicantDept) {
+        boolean needsDept = tiers.stream().anyMatch(t -> TYPE_DEPARTMENT.equalsIgnoreCase(t.approverType()));
+        if (!needsDept) {
+            return Uni.createFrom().item(tiers);
+        }
+        return flowRepo.findDepartmentInCharge(pool, applicantDept).flatMap(inChargeId -> {
+            if (inChargeId == null || inChargeId.isBlank()) {
+                // No in-charge → skip DEPARTMENT tiers (they can't resolve); keep the rest.
+                return Uni.createFrom().item(tiers.stream()
+                        .filter(t -> !TYPE_DEPARTMENT.equalsIgnoreCase(t.approverType()))
+                        .toList());
+            }
+            return staffRepo.findByStaffId(pool, inChargeId).map(inCharge -> {
+                String name = inCharge != null ? inCharge.getName() : null;
+                String dept = inCharge != null ? inCharge.getDepartment() : null;
+                List<Tier> out = new ArrayList<>();
+                for (Tier t : tiers) {
+                    if (TYPE_DEPARTMENT.equalsIgnoreCase(t.approverType())) {
+                        out.add(new Tier(t.level(), TYPE_STAFF, inChargeId, name, dept, t.status()));
+                    } else {
+                        out.add(t);
+                    }
+                }
+                return out;
+            });
+        });
+    }
+
+    /**
+     * The staff ids to notify for a leave, read from its frozen SNAPSHOT (so DEPARTMENT
+     * tiers resolved at submit are honoured): the first pending tier (SEQUENTIAL) or every
+     * tier (PARALLEL). Empty when the leave has no snapshot (not flow-governed → caller
+     * falls back to the applicant-chosen approver).
+     */
+    public Uni<List<String>> pendingApproversFromSnapshot(SqlClient pool, long leaveId) {
+        return resolve(pool, leaveId).map(flow ->
+                flow.active() ? pendingApproverStaffIds(flow.tiers(), flow.actions(), flow.mode()) : List.of());
+    }
+
+    /**
+     * The pending approver staff ids for a NEW leave under the live flow, resolved for the
+     * applicant's department (DEPARTMENT → dept in-charge; PROJECT and any tier that cannot
+     * resolve are skipped) using the SAME resolution that the submit snapshot applies: the
+     * first pending tier (SEQUENTIAL) or every tier (PARALLEL). Empty when no flow is active
+     * or nothing resolves — the caller then requires the applicant to pick an approver.
+     */
+    public Uni<List<String>> resolvedInitialApprovers(SqlClient pool, String applicantDept) {
         return flowRepo.findHeader(pool, MODULE_ID, SCREEN_TYPE).flatMap(header -> {
             boolean on = header != null && "ON".equalsIgnoreCase(header.status());
             if (!on) {
                 return Uni.createFrom().item(List.of());
             }
             return flowRepo.findOnTiers(pool, header.refId())
-                    .map(tiers -> pendingApproverStaffIds(tiers, List.of(), header.mode()));
+                    .flatMap(tiers -> resolveTiersForSnapshot(pool, tiers, applicantDept))
+                    .map(resolved -> pendingApproverStaffIds(resolved, List.of(), header.mode()));
         });
     }
 
