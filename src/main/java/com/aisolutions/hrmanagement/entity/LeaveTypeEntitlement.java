@@ -31,6 +31,10 @@ public class LeaveTypeEntitlement {
     @Column(name = "LeaveType", length = 5)
     private String leaveType;
 
+    /** Threshold unit for this band: YEAR (service-year ladder) or MONTH (service-month step). */
+    @Column(name = "UnitType", length = 10)
+    private String unitType;
+
     /** Completed-years threshold for this band. */
     @Column(name = "YearOfService")
     private Integer yearOfService;

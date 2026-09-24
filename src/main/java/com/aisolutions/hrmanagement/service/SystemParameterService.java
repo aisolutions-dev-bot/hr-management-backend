@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Reads configuration from m07SystemParameters instead of application.properties.
@@ -49,20 +50,33 @@ public class SystemParameterService {
 
     private static final Duration CACHE_TTL = Duration.ofMinutes(5);
 
-    private volatile FtpConfig cachedFtpConfig;
-    private volatile Instant   cacheExpiry = Instant.MIN;
+    /**
+     * Per-tenant config caches, keyed by the resolving {@code companyId} (blank =
+     * default DB). Previously a single shared field cached whichever entity loaded
+     * first and served ITS FTP host/path — and base currency — to EVERY other entity
+     * for the TTL, so one company's receipts could be written to (or read from)
+     * another company's FTP folder. Keying the cache on companyId isolates each tenant.
+     */
+    private record CacheEntry<T>(T value, Instant expiry) {
+        boolean isFresh() {
+            return Instant.now().isBefore(expiry);
+        }
+    }
 
-    private volatile String  cachedBaseCurrency;
-    private volatile Instant baseCurrencyExpiry = Instant.MIN;
+    private final Map<String, CacheEntry<FtpConfig>> ftpConfigByCompany    = new ConcurrentHashMap<>();
+    private final Map<String, CacheEntry<String>>    baseCurrencyByCompany = new ConcurrentHashMap<>();
 
     /**
-     * Load FTP configuration from m07SystemParameters.
+     * Load FTP configuration from m07SystemParameters for the caller's company.
+     * Cached per tenant for 5 minutes.
      */
     public Uni<FtpConfig> loadFtpConfig() {
-        if (cachedFtpConfig != null && Instant.now().isBefore(cacheExpiry)) {
-            return Uni.createFrom().item(cachedFtpConfig);
+        String companyId = currentUserService.getCurrentCompanyId();
+        CacheEntry<FtpConfig> cached = ftpConfigByCompany.get(companyId);
+        if (cached != null && cached.isFresh()) {
+            return Uni.createFrom().item(cached.value());
         }
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+        return companyPoolManager.poolFor(companyId)
             .flatMap(pool -> systemParameterRepository.getParameterMap(pool, FTP_PARAMS))
             .map(params -> {
                 String mode = params.get("ATTACHMENT-MODE");
@@ -85,39 +99,38 @@ public class SystemParameterService {
                     require(params, "ATTACHMENT-MAIN-URL"),
                     folder.trim()
                 );
-                cachedFtpConfig = config;
-                cacheExpiry = Instant.now().plus(CACHE_TTL);
+                ftpConfigByCompany.put(companyId, new CacheEntry<>(config, Instant.now().plus(CACHE_TTL)));
                 return config;
             });
     }
 
-    /** Force the next {@link #loadFtpConfig()} call to re-fetch from DB. */
+    /** Force the next {@link #loadFtpConfig()} call to re-fetch from DB, for every tenant. */
     public void clearFtpConfigCache() {
-        cachedFtpConfig = null;
-        cacheExpiry     = Instant.MIN;
+        ftpConfigByCompany.clear();
     }
 
     /**
-     * The currency every claim amount is recorded in, from CURRENCY-BASE.
+     * The currency every claim amount is recorded in, from CURRENCY-BASE, for the caller's company.
+     * Cached per tenant for 5 minutes.
      */
     public Uni<String> loadBaseCurrency() {
-        if (cachedBaseCurrency != null && Instant.now().isBefore(baseCurrencyExpiry)) {
-            return Uni.createFrom().item(cachedBaseCurrency);
+        String companyId = currentUserService.getCurrentCompanyId();
+        CacheEntry<String> cached = baseCurrencyByCompany.get(companyId);
+        if (cached != null && cached.isFresh()) {
+            return Uni.createFrom().item(cached.value());
         }
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+        return companyPoolManager.poolFor(companyId)
             .flatMap(pool -> systemParameterRepository.getParameterMap(pool, List.of(PARAM_BASE_CURRENCY)))
             .map(params -> {
                 String currency = require(params, PARAM_BASE_CURRENCY);
-                cachedBaseCurrency = currency;
-                baseCurrencyExpiry = Instant.now().plus(CACHE_TTL);
+                baseCurrencyByCompany.put(companyId, new CacheEntry<>(currency, Instant.now().plus(CACHE_TTL)));
                 return currency;
             });
     }
 
-    /** Force the next {@link #loadBaseCurrency()} call to re-fetch from DB. */
+    /** Force the next {@link #loadBaseCurrency()} call to re-fetch from DB, for every tenant. */
     public void clearBaseCurrencyCache() {
-        cachedBaseCurrency = null;
-        baseCurrencyExpiry = Instant.MIN;
+        baseCurrencyByCompany.clear();
     }
 
     /**

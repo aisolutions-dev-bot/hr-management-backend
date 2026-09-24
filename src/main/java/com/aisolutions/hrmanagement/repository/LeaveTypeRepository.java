@@ -113,7 +113,7 @@ public class LeaveTypeRepository {
     /** Entitlement bands for a leave type, ascending by YearOfService. */
     public Uni<List<LeaveTypeEntitlement>> findEntitlements(SqlClient client, String leaveType) {
         return client.preparedQuery(
-                "SELECT UniqId, LeaveType, YearOfService, DaysOfLeave " +
+                "SELECT UniqId, LeaveType, UnitType, YearOfService, DaysOfLeave " +
                 "FROM m01LeaveTypeEntitlement WHERE LeaveType = ? ORDER BY YearOfService ASC")
             .execute(Tuple.tuple().addValue(leaveType))
             .map(this::toEntitlementList);
@@ -122,10 +122,41 @@ public class LeaveTypeRepository {
     /** Every entitlement band, ordered by leave type then YearOfService ascending. */
     public Uni<List<LeaveTypeEntitlement>> findAllEntitlements(SqlClient client) {
         return client.preparedQuery(
-                "SELECT UniqId, LeaveType, YearOfService, DaysOfLeave " +
+                "SELECT UniqId, LeaveType, UnitType, YearOfService, DaysOfLeave " +
                 "FROM m01LeaveTypeEntitlement ORDER BY LeaveType ASC, YearOfService ASC")
             .execute()
             .map(this::toEntitlementList);
+    }
+
+    /** Pro-ration method for one leave type (NONE | LINEAR | STEP); NONE when unset. Fail-safe NONE. */
+    public Uni<String> findProRateMethod(SqlClient client, String leaveType) {
+        if (leaveType == null || leaveType.isBlank()) {
+            return Uni.createFrom().item("NONE");
+        }
+        return client.preparedQuery("SELECT ProRateMethod FROM m01LeaveType WHERE LeaveType = ?")
+            .execute(Tuple.of(leaveType.trim()))
+            .map(rows -> {
+                if (!rows.iterator().hasNext()) return "NONE";
+                String m = rows.iterator().next().getString("ProRateMethod");
+                return (m == null || m.isBlank()) ? "NONE" : m;
+            })
+            .onFailure().recoverWithItem("NONE");
+    }
+
+    /** Pro-ration method per leave type (missing/blank read as NONE). Fail-safe empty. */
+    public Uni<Map<String, String>> findProRateMethods(SqlClient client) {
+        return client.preparedQuery("SELECT LeaveType, ProRateMethod FROM m01LeaveType")
+            .execute()
+            .map(rows -> {
+                Map<String, String> methods = new HashMap<>();
+                for (Row row : rows) {
+                    String code = row.getString("LeaveType");
+                    String m = row.getString("ProRateMethod");
+                    if (code != null) methods.put(code, (m == null || m.isBlank()) ? "NONE" : m);
+                }
+                return methods;
+            })
+            .onFailure().recoverWithItem(Map.of());
     }
 
     private List<LeaveTypeEntitlement> toEntitlementList(RowSet<Row> rows) {
@@ -134,6 +165,7 @@ public class LeaveTypeRepository {
             LeaveTypeEntitlement e = new LeaveTypeEntitlement();
             e.setUniqId(row.getLong("UniqId"));
             e.setLeaveType(row.getString("LeaveType"));
+            e.setUnitType(row.getString("UnitType"));
             e.setYearOfService(row.getInteger("YearOfService"));
             e.setDaysOfLeave(row.getInteger("DaysOfLeave"));
             result.add(e);
