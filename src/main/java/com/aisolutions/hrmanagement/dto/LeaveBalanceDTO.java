@@ -30,6 +30,7 @@ public class LeaveBalanceDTO {
     private BigDecimal approvedDays;  // the approved slice of takenDays (used)
     private BigDecimal pendingDays;   // the still-pending slice of takenDays
     private BigDecimal remainingDays; // available − pending (may be negative)
+    private BigDecimal advanceTakenDays; // of takenDays, the portion taken as advanced leave (borrowed)
 
     // ── Carry-forward ──
     private BigDecimal broughtForwardDays; // still-available days carried in from prior years

@@ -80,6 +80,25 @@ public class LeaveResource {
                 .onFailure().recoverWithItem(LeaveResource::toError));
     }
 
+    // ── Over-balance funding preview (paid / advanced / unpaid) ──
+    @GET
+    @Path("/overflow-preview")
+    public Uni<Response> overflowPreview(@QueryParam("staffId") String staffId,
+                                         @QueryParam("leaveType") String leaveType,
+                                         @QueryParam("days") String days) {
+        return access.gate(CODE, () -> {
+            BigDecimal total;
+            try {
+                total = (days == null || days.isBlank()) ? null : new BigDecimal(days.trim());
+            } catch (NumberFormatException e) {
+                return Uni.createFrom().item(badRequest("Invalid days value"));
+            }
+            return leaveService.previewOverflow(staffId, leaveType, total)
+                    .map(dto -> Response.ok(dto).build())
+                    .onFailure().recoverWithItem(LeaveResource::toError);
+        });
+    }
+
     // ── All-types balance summary (dashboard) ──
     @GET
     @Path("/balances")

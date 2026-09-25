@@ -36,7 +36,8 @@ public final class LeaveBalanceCalculator {
             Integer serviceYears,       // snapshot from the year's grant, may be null
             BigDecimal expiring,        // available days that expire by the end of the target year
             LocalDate nextExpiry,       // soonest upcoming expiry among still-available buckets
-            BigDecimal lapsed) {}       // days already lost to expiry/cap
+            BigDecimal lapsed,          // days already lost to expiry/cap
+            BigDecimal advanceTaken) {} // of "approved", the portion taken as advanced leave (borrowed)
 
     private static final class Bucket {
         final int originYear;
@@ -50,7 +51,8 @@ public final class LeaveBalanceCalculator {
 
     private static final class Consumption {
         LocalDate date;
-        BigDecimal net = BigDecimal.ZERO;   // TAKEN negative, reversal positive
+        BigDecimal net = BigDecimal.ZERO;       // TAKEN/TAKEN_ADVANCE negative, reversal positive
+        BigDecimal advance = BigDecimal.ZERO;   // magnitude of the TAKEN_ADVANCE portion for this leave
     }
 
     private record ConsEvent(LocalDate date, BigDecimal amount) {}   // amount > 0
@@ -70,10 +72,11 @@ public final class LeaveBalanceCalculator {
                     entitledThisYear = entitledThisYear.add(nz(r.days()));
                     if (r.serviceYears() != null) serviceYears = r.serviceYears();
                 }
-            } else { // TAKEN / ADJUSTMENT / LAPSE / ENCASH — consumption, netted by source leave
+            } else { // TAKEN / TAKEN_ADVANCE / ADJUSTMENT / LAPSE / ENCASH — consumption, netted by source leave
                 String ref = r.sourceRefId() != null ? r.sourceRefId() : ("@" + System.identityHashCode(r));
                 Consumption c = byRef.computeIfAbsent(ref, k -> new Consumption());
                 c.net = c.net.add(nz(r.days()));
+                if ("TAKEN_ADVANCE".equals(t)) c.advance = c.advance.add(nz(r.days()).abs());
                 LocalDate d = r.txnDate() != null ? r.txnDate() : LocalDate.of(r.originYear(), 1, 1);
                 if (c.date == null || d.isBefore(c.date)) c.date = d;
             }
@@ -91,8 +94,18 @@ public final class LeaveBalanceCalculator {
             if (ce.date.getYear() == year) approvedThisYear = approvedThisYear.add(ce.amount);
         }
 
+        // Of that, the still-outstanding advanced-leave portion, dated in the target year. A leave
+        // that was later cancelled nets to zero, so its advance no longer counts.
+        BigDecimal advanceThisYear = BigDecimal.ZERO;
+        for (Consumption c : byRef.values()) {
+            if (c.net.signum() < 0 && c.advance.signum() > 0 && c.date != null && c.date.getYear() == year) {
+                advanceThisYear = advanceThisYear.add(c.advance.min(c.net.abs()));
+            }
+        }
+
         if (buckets.isEmpty()) {
-            return new Result(false, null, null, approvedThisYear, null, serviceYears, null, null, null);
+            return new Result(false, null, null, approvedThisYear, null, serviceYears, null, null, null,
+                    advanceThisYear);
         }
 
         BigDecimal lapsed = BigDecimal.ZERO;
@@ -185,7 +198,7 @@ public final class LeaveBalanceCalculator {
         }
         BigDecimal available = broughtForward.add(thisYearRemaining).subtract(overdraw);
         return new Result(true, entitledThisYear, broughtForward, approvedThisYear, available,
-                serviceYears, expiring, nextExpiry, lapsed);
+                serviceYears, expiring, nextExpiry, lapsed, advanceThisYear);
     }
 
     /** Soonest-to-expire first (never-expiring last), then oldest, so carried days are used first. */

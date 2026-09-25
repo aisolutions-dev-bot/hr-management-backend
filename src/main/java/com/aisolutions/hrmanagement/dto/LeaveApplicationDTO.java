@@ -35,6 +35,15 @@ public class LeaveApplicationDTO {
     private String halfDayPeriod; // AM | PM | null
     private BigDecimal totalDays;
 
+    // Over-balance funding split — set on read; null for in-balance leaves
+    private BigDecimal paidDays;
+    private BigDecimal advanceDays;
+    private BigDecimal unpaidDays;
+
+    /** Request-only: the staff has seen and confirmed the advance/unpaid split.
+     *  A submit that overflows the balance without this is rejected. */
+    private boolean overflowConfirmed;
+
     // Step 3 (CANCEL)
     private Long cancelRefId;
 

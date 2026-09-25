@@ -78,6 +78,19 @@ public class LeaveApplication {
     @Column(name = "TotalDays", precision = 5, scale = 1)
     private BigDecimal totalDays;
 
+    // ── Over-balance funding split — null for normal (in-balance) leaves ──
+    /** Days covered by the available paid balance. */
+    @Column(name = "PaidDays", precision = 5, scale = 1)
+    private BigDecimal paidDays;
+
+    /** Days borrowed against future entitlement (advanced leave); drives the ledger negative. */
+    @Column(name = "AdvanceDays", precision = 5, scale = 1)
+    private BigDecimal advanceDays;
+
+    /** Days beyond both balance and advance cap — taken as unpaid leave. */
+    @Column(name = "UnpaidDays", precision = 5, scale = 1)
+    private BigDecimal unpaidDays;
+
     /** The APPLY row this CANCEL targets (m18LeaveApplications.UniqId); null for APPLY. */
     @Column(name = "CancelRefId")
     private Long cancelRefId;

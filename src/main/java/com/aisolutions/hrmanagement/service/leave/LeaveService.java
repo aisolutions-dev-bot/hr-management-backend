@@ -6,6 +6,7 @@ import com.aisolutions.hrmanagement.dto.DropdownOptionDTO;
 import com.aisolutions.hrmanagement.dto.LeaveApplicationDTO;
 import com.aisolutions.hrmanagement.dto.LeaveBalanceDTO;
 import com.aisolutions.hrmanagement.dto.LeaveLedgerRow;
+import com.aisolutions.hrmanagement.dto.LeaveOverflowPreviewDTO;
 import com.aisolutions.hrmanagement.dto.StaffProfileDTO;
 import com.aisolutions.hrmanagement.entity.LeaveApplication;
 import com.aisolutions.hrmanagement.entity.LeaveTypeEntitlement;
@@ -16,6 +17,7 @@ import com.aisolutions.hrmanagement.repository.LeavePolicyRepository;
 import com.aisolutions.hrmanagement.repository.LeaveTypeRepository;
 import com.aisolutions.hrmanagement.repository.NotificationRepository;
 import com.aisolutions.hrmanagement.service.leave.LeaveEntitlementCalculator.Policy;
+import com.aisolutions.hrmanagement.repository.LeavePolicyRepository.AdvancePolicy;
 import com.aisolutions.hrmanagement.repository.StaffRepository;
 import com.aisolutions.hrmanagement.service.approval.ApprovalFlowService;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
@@ -151,6 +153,7 @@ public class LeaveService {
         dto.setApprovedDays(approved);
         dto.setPendingDays(pending);
         dto.setTakenDays(taken);
+        dto.setAdvanceTakenDays(nz(res.advanceTaken()));
         // The ledger's assigned entitlement (GRANT buckets) wins over the ladder when present.
         if (res.hasGrant()) {
             applyLedgerBalance(dto, res, pending);
@@ -273,6 +276,7 @@ public class LeaveService {
         dto.setApprovedDays(approved);
         dto.setPendingDays(pending);
         dto.setTakenDays(taken);
+        dto.setAdvanceTakenDays(nz(res.advanceTaken()));
         // The ledger's assigned entitlement (GRANT buckets) wins over the ladder when present.
         if (res.hasGrant()) {
             applyLedgerBalance(dto, res, pending);
@@ -449,7 +453,9 @@ public class LeaveService {
                         }
                         return buildAndValidate(action, dto, staffId, staff, pool)
                             .flatMap(entity -> ACTION_APPLY.equals(entity.getLeaveAction())
-                                    ? validateApplyEligibility(pool, staff, entity.getLeaveType()).replaceWith(entity)
+                                    ? validateApplyEligibility(pool, staff, entity.getLeaveType())
+                                        .flatMap(v -> applyOverflowSplit(pool, staffId, staff, entity,
+                                                dto.isOverflowConfirmed()))
                                     : Uni.createFrom().item(entity))
                             .flatMap(entity -> saveAndNotify(pool, entity, deviceInfo));
                     });
@@ -588,6 +594,112 @@ public class LeaveService {
                 }
                 return Uni.createFrom().voidItem();
             }));
+    }
+
+    // ─────────────────────────────────────────────────────────
+    //  OVER-BALANCE OVERFLOW → advanced / unpaid split
+    // ─────────────────────────────────────────────────────────
+
+    /** What the overflow split resolved to, plus the inputs used, for the preview / enforcement. */
+    private record OverflowResult(LeaveOverflowCalculator.Split split, BigDecimal remaining,
+                                  boolean allowAdvance, BigDecimal advanceMaxDays, boolean entitlementKnown) {
+        boolean hasOverflow() { return split.hasOverflow(); }
+    }
+
+    /**
+     * Sets the paid/advance/unpaid split on an APPLY entity when it exceeds the paid balance.
+     * In-balance applications keep the split columns null (behaviour unchanged). An overflow
+     * that the staff has not confirmed is rejected so unpaid/advanced leave is never created
+     * silently.
+     */
+    private Uni<LeaveApplication> applyOverflowSplit(io.vertx.mutiny.sqlclient.SqlClient pool, String staffId,
+                                                     Staff staff, LeaveApplication entity, boolean confirmed) {
+        BigDecimal total = entity.getTotalDays();
+        if (total == null || total.signum() <= 0) {
+            return Uni.createFrom().item(entity);
+        }
+        return computeOverflow(pool, staffId, staff, entity.getLeaveType(), total).map(ov -> {
+            if (!ov.hasOverflow()) {
+                return entity;   // covered by the paid balance — no split stored
+            }
+            if (!confirmed) {
+                throw new IllegalArgumentException(overflowMessage(entity.getLeaveType(), ov)
+                        + " Please confirm to proceed.");
+            }
+            entity.setPaidDays(ov.split().paid());
+            entity.setAdvanceDays(ov.split().advance());
+            entity.setUnpaidDays(ov.split().unpaid());
+            return entity;
+        });
+    }
+
+    /** Resolves the funding split for a leave type + day count against the current balance + policy. */
+    private Uni<OverflowResult> computeOverflow(io.vertx.mutiny.sqlclient.SqlClient pool, String staffId,
+                                                Staff staff, String leaveType, BigDecimal total) {
+        return getSingleBalance(pool, staffId, staff, leaveType).flatMap(bal ->
+            leavePolicyRepo.findAdvancePolicy(pool).map(adv -> {
+                // No known paid entitlement (on-request / no join date) → no overflow concept.
+                if (!bal.isEntitlementKnown() || bal.getRemainingDays() == null) {
+                    return new OverflowResult(new LeaveOverflowCalculator.Split(
+                            total, BigDecimal.ZERO, BigDecimal.ZERO, false),
+                            null, adv.allowAdvance(), adv.maxDays(), false);
+                }
+                BigDecimal remaining = bal.getRemainingDays();
+                LeaveOverflowCalculator.Split split =
+                        LeaveOverflowCalculator.compute(total, remaining, adv.allowAdvance(), adv.maxDays());
+                return new OverflowResult(split, remaining, adv.allowAdvance(), adv.maxDays(), true);
+            }));
+    }
+
+    /** Apply-form preview: how the requested days would be funded (paid / advanced / unpaid). */
+    public Uni<LeaveOverflowPreviewDTO> previewOverflow(String requestedStaffId, String leaveType, BigDecimal total) {
+        if (leaveType == null || leaveType.isBlank()) {
+            return Uni.createFrom().failure(new IllegalArgumentException("leaveType is required"));
+        }
+        if (total == null || total.signum() <= 0) {
+            return Uni.createFrom().failure(new IllegalArgumentException("days must be greater than zero"));
+        }
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+            .flatMap(pool -> resolveStaffId(requestedStaffId)
+                .flatMap(staffId -> staffRepo.findByStaffId(pool, staffId)
+                    .flatMap(staff -> computeOverflow(pool, staffId, staff, leaveType, total)
+                        .map(ov -> toPreview(leaveType, total, ov)))));
+    }
+
+    private LeaveOverflowPreviewDTO toPreview(String leaveType, BigDecimal total, OverflowResult ov) {
+        LeaveOverflowPreviewDTO dto = new LeaveOverflowPreviewDTO();
+        dto.setLeaveType(leaveType);
+        dto.setTotalDays(total);
+        dto.setRemainingDays(ov.remaining());
+        dto.setPaidDays(ov.split().paid());
+        dto.setAdvanceDays(ov.split().advance());
+        dto.setUnpaidDays(ov.split().unpaid());
+        dto.setAllowAdvance(ov.allowAdvance());
+        dto.setAdvanceMaxDays(ov.advanceMaxDays());
+        dto.setHasOverflow(ov.hasOverflow());
+        dto.setRequiresConfirm(ov.hasOverflow());
+        dto.setMessage(ov.hasOverflow() ? overflowMessage(leaveType, ov) : null);
+        return dto;
+    }
+
+    /** A human sentence describing the split, for the confirm dialog / rejection message. */
+    private static String overflowMessage(String leaveType, OverflowResult ov) {
+        LeaveOverflowCalculator.Split s = ov.split();
+        String type = nz(leaveType);
+        StringBuilder sb = new StringBuilder("This exceeds your ").append(type)
+                .append(" balance: ").append(plain(s.paid())).append(" day(s) paid");
+        if (s.advance().signum() > 0) {
+            sb.append(", ").append(plain(s.advance()))
+              .append(" day(s) advanced leave (borrowed against future entitlement)");
+        }
+        if (s.unpaid().signum() > 0) {
+            sb.append(", ").append(plain(s.unpaid())).append(" day(s) unpaid");
+        }
+        return sb.append('.').toString();
+    }
+
+    private static String plain(BigDecimal v) {
+        return (v != null ? v : BigDecimal.ZERO).stripTrailingZeros().toPlainString();
     }
 
     public static BigDecimal workingDays(LocalDate from, LocalDate to, String half) {
@@ -840,6 +952,9 @@ public class LeaveService {
         dto.setToDate(e.getToDate());
         dto.setHalfDayPeriod(e.getHalfDayPeriod());
         dto.setTotalDays(e.getTotalDays());
+        dto.setPaidDays(e.getPaidDays());
+        dto.setAdvanceDays(e.getAdvanceDays());
+        dto.setUnpaidDays(e.getUnpaidDays());
         dto.setCancelRefId(e.getCancelRefId());
         dto.setApproverStaffId(e.getApproverStaffId());
         dto.setStatus(e.getStatus());

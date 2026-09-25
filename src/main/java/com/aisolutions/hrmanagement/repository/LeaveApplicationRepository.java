@@ -23,7 +23,8 @@ public class LeaveApplicationRepository {
     public Uni<LeaveApplication> findById(SqlClient client, Long id) {
         return client.preparedQuery(
                 "SELECT UniqId, StaffId, StaffName, Department, ApplicationDate, LeaveAction, " +
-                "LeaveType, Remarks, FromDate, ToDate, HalfDayPeriod, TotalDays, CancelRefId, " +
+                "LeaveType, Remarks, FromDate, ToDate, HalfDayPeriod, TotalDays, " +
+                "PaidDays, AdvanceDays, UnpaidDays, CancelRefId, " +
                 "ApproverStaffId, Status, ApprovedBy, ApprovedDate, RejectReason, " +
                 "EntryStaff, EntryDate, LastEditStaff, LastEditDate " +
                 "FROM m18LeaveApplications WHERE UniqId = ?")
@@ -35,9 +36,10 @@ public class LeaveApplicationRepository {
         return client.preparedQuery(
                 "INSERT INTO m18LeaveApplications (StaffId, StaffName, Department, ApplicationDate, " +
                 "LeaveAction, LeaveType, Remarks, FromDate, ToDate, HalfDayPeriod, TotalDays, " +
+                "PaidDays, AdvanceDays, UnpaidDays, " +
                 "CancelRefId, ApproverStaffId, Status, ApprovedBy, ApprovedDate, RejectReason, " +
                 "EntryStaff, EntryDate, LastEditStaff, LastEditDate) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .execute(Tuple.tuple()
                 .addValue(entity.getStaffId())
                 .addValue(entity.getStaffName())
@@ -50,6 +52,9 @@ public class LeaveApplicationRepository {
                 .addValue(entity.getToDate())
                 .addValue(entity.getHalfDayPeriod())
                 .addValue(entity.getTotalDays())
+                .addValue(entity.getPaidDays())
+                .addValue(entity.getAdvanceDays())
+                .addValue(entity.getUnpaidDays())
                 .addValue(entity.getCancelRefId())
                 .addValue(entity.getApproverStaffId())
                 .addValue(entity.getStatus())
@@ -71,7 +76,8 @@ public class LeaveApplicationRepository {
         return client.preparedQuery(
                 "UPDATE m18LeaveApplications SET StaffId = ?, StaffName = ?, Department = ?, " +
                 "ApplicationDate = ?, LeaveAction = ?, LeaveType = ?, Remarks = ?, FromDate = ?, " +
-                "ToDate = ?, HalfDayPeriod = ?, TotalDays = ?, CancelRefId = ?, ApproverStaffId = ?, " +
+                "ToDate = ?, HalfDayPeriod = ?, TotalDays = ?, PaidDays = ?, AdvanceDays = ?, " +
+                "UnpaidDays = ?, CancelRefId = ?, ApproverStaffId = ?, " +
                 "Status = ?, ApprovedBy = ?, ApprovedDate = ?, RejectReason = ?, " +
                 "EntryStaff = ?, EntryDate = ?, LastEditStaff = ?, LastEditDate = ? " +
                 "WHERE UniqId = ?")
@@ -87,6 +93,9 @@ public class LeaveApplicationRepository {
                 .addValue(entity.getToDate())
                 .addValue(entity.getHalfDayPeriod())
                 .addValue(entity.getTotalDays())
+                .addValue(entity.getPaidDays())
+                .addValue(entity.getAdvanceDays())
+                .addValue(entity.getUnpaidDays())
                 .addValue(entity.getCancelRefId())
                 .addValue(entity.getApproverStaffId())
                 .addValue(entity.getStatus())
@@ -105,7 +114,8 @@ public class LeaveApplicationRepository {
     public Uni<List<LeaveApplication>> findByStaff(SqlClient client, String staffId) {
         return client.preparedQuery(
                 "SELECT UniqId, StaffId, StaffName, Department, ApplicationDate, LeaveAction, " +
-                "LeaveType, Remarks, FromDate, ToDate, HalfDayPeriod, TotalDays, CancelRefId, " +
+                "LeaveType, Remarks, FromDate, ToDate, HalfDayPeriod, TotalDays, " +
+                "PaidDays, AdvanceDays, UnpaidDays, CancelRefId, " +
                 "ApproverStaffId, Status, ApprovedBy, ApprovedDate, RejectReason, " +
                 "EntryStaff, EntryDate, LastEditStaff, LastEditDate " +
                 "FROM m18LeaveApplications WHERE StaffId = ? ORDER BY UniqId DESC")
@@ -117,7 +127,8 @@ public class LeaveApplicationRepository {
     public Uni<List<LeaveApplication>> findCancelable(SqlClient client, String staffId, String leaveType) {
         return client.preparedQuery(
                 "SELECT UniqId, StaffId, StaffName, Department, ApplicationDate, LeaveAction, " +
-                "LeaveType, Remarks, FromDate, ToDate, HalfDayPeriod, TotalDays, CancelRefId, " +
+                "LeaveType, Remarks, FromDate, ToDate, HalfDayPeriod, TotalDays, " +
+                "PaidDays, AdvanceDays, UnpaidDays, CancelRefId, " +
                 "ApproverStaffId, Status, ApprovedBy, ApprovedDate, RejectReason, " +
                 "EntryStaff, EntryDate, LastEditStaff, LastEditDate " +
                 "FROM m18LeaveApplications WHERE StaffId = ? AND LeaveType = ? " +
@@ -185,6 +196,9 @@ public class LeaveApplicationRepository {
         e.setToDate(row.getLocalDate("ToDate"));
         e.setHalfDayPeriod(row.getString("HalfDayPeriod"));
         e.setTotalDays(row.getBigDecimal("TotalDays"));
+        e.setPaidDays(row.getBigDecimal("PaidDays"));
+        e.setAdvanceDays(row.getBigDecimal("AdvanceDays"));
+        e.setUnpaidDays(row.getBigDecimal("UnpaidDays"));
         e.setCancelRefId(row.getLong("CancelRefId"));
         e.setApproverStaffId(row.getString("ApproverStaffId"));
         e.setStatus(row.getString("Status"));

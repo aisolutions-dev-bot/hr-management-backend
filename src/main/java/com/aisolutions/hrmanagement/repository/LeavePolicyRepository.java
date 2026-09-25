@@ -8,6 +8,8 @@ import io.vertx.mutiny.sqlclient.SqlClient;
 import jakarta.enterprise.context.ApplicationScoped;
 import lombok.extern.slf4j.Slf4j;
 
+import java.math.BigDecimal;
+
 /**
  * Raw SqlClient repository for m01LeavePolicy — the per-company leave policy
  * (leave-year basis, pro-ration allocation type, eligibility gate, rounding).
@@ -42,6 +44,33 @@ public class LeavePolicyRepository {
             .onFailure().recoverWithItem(() -> {
                 log.warn("Falling back to default leave policy — m01LeavePolicy read failed");
                 return Policy.defaults();
+            });
+    }
+
+    /** The advanced-leave policy: whether over-balance leave may borrow against future
+     *  entitlement, and by how many days at most. Fail-safe = advance OFF. */
+    public record AdvancePolicy(boolean allowAdvance, BigDecimal maxDays) {
+        public static AdvancePolicy off() {
+            return new AdvancePolicy(false, BigDecimal.ZERO);
+        }
+    }
+
+    public Uni<AdvancePolicy> findAdvancePolicy(SqlClient client) {
+        return client.preparedQuery(
+                "SELECT AllowAdvanceLeave, AdvanceLeaveMaxDays "
+                        + "FROM m01LeavePolicy ORDER BY UniqId ASC LIMIT 1")
+            .execute()
+            .map(rows -> {
+                if (!rows.iterator().hasNext()) return AdvancePolicy.off();
+                Row r = rows.iterator().next();
+                Integer allow = r.getInteger("AllowAdvanceLeave");
+                BigDecimal max = r.getBigDecimal("AdvanceLeaveMaxDays");
+                boolean on = allow != null && allow != 0;
+                return new AdvancePolicy(on, max != null ? max : BigDecimal.ZERO);
+            })
+            .onFailure().recoverWithItem(() -> {
+                log.warn("Falling back to advance-leave OFF — m01LeavePolicy read failed");
+                return AdvancePolicy.off();
             });
     }
 }
