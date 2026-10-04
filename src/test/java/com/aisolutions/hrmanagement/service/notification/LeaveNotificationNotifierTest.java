@@ -2,6 +2,7 @@ package com.aisolutions.hrmanagement.service.notification;
 
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 
 import com.aisolutions.hrmanagement.entity.LeaveApplication;
 import com.aisolutions.hrmanagement.entity.Staff;
@@ -16,10 +17,11 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
@@ -39,6 +41,23 @@ class LeaveNotificationNotifierTest {
     private static final String LEAVE_TYPE_ANNUAL = "ANNUAL";
     private static final String LEAVE_TEMPLATE_NAME = "hr_leave_submitted_v1";
     private static final String NOTIFICATION_LANGUAGE = "en";
+
+    /** A failed staff lookup aborts staging so a leave cannot commit without its notification. */
+    @Test
+    void propagatesApproverStaffLookupFailure() {
+        stubAllChannelSwitches(true);
+        when(staffRepository.findByStaffId(any(SqlClient.class), eq(APPROVER_ID)))
+                .thenReturn(Uni.createFrom().failure(new IllegalStateException("staff database unavailable")));
+
+        assertThrows(
+                IllegalStateException.class,
+                () -> notifier()
+                        .notifyLeaveSubmitted(context(), leaveApplication(), List.of(APPROVER_ID))
+                        .await()
+                        .indefinitely());
+        verify(notificationPublisher, never())
+                .enqueueEmailTemplate(any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
+    }
 
     @Mock
     NotificationPublisher notificationPublisher;
@@ -62,23 +81,29 @@ class LeaveNotificationNotifierTest {
                 .indefinitely();
 
         verify(notificationPublisher)
-                .enqueueEmail(
+                .enqueueEmailTemplate(
                         any(NotificationTransaction.class),
                         eq(APPROVER_EMAIL),
-                        eq("Leave application from Alice - ANNUAL"),
-                        contains("Hi Bob"));
+                        eq(LEAVE_TEMPLATE_NAME),
+                        eq(NOTIFICATION_LANGUAGE),
+                        argThat((Map<String, Object> parameters) -> parameters.get("approver_name").equals(APPROVER_NAME)
+                                && parameters.get("applicant_name").equals(APPLICANT_NAME)
+                                && parameters.get("action").equals("submitted")));
         verify(notificationPublisher)
-                .enqueueSms(
+                .enqueueSmsTemplate(
                         any(NotificationTransaction.class),
                         eq(APPROVER_MOBILE),
-                        contains("Leave application from Alice"));
+                        eq(LEAVE_TEMPLATE_NAME),
+                        eq(NOTIFICATION_LANGUAGE),
+                        argThat((Map<String, Object> parameters) -> parameters.get("applicant_name").equals(APPLICANT_NAME)
+                                && parameters.get("period").toString().contains("2026-09-10")));
         verify(notificationPublisher)
                 .enqueueWhatsappTemplate(
                         any(NotificationTransaction.class),
                         eq(APPROVER_MOBILE),
                         eq(LEAVE_TEMPLATE_NAME),
                         eq(NOTIFICATION_LANGUAGE),
-                        anyList());
+                        anyMap());
     }
 
     /** Skips every channel when the tenant has them all switched off. */
@@ -92,11 +117,13 @@ class LeaveNotificationNotifierTest {
                 .indefinitely();
 
         verify(notificationPublisher, never())
-                .enqueueEmail(any(NotificationTransaction.class), anyString(), anyString(), anyString());
-        verify(notificationPublisher, never()).enqueueSms(any(NotificationTransaction.class), anyString(), anyString());
+                .enqueueEmailTemplate(
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
+        verify(notificationPublisher, never())
+                .enqueueSmsTemplate(any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
         verify(notificationPublisher, never())
                 .enqueueWhatsappTemplate(
-                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyList());
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
     }
 
     /** Builds a notifier whose dispatcher shares the stubbed publisher and parameter service. */
@@ -117,12 +144,15 @@ class LeaveNotificationNotifierTest {
 
     /** Stubs all three tenant switches to the same value. */
     private void stubAllChannelSwitches(boolean enabled) {
-        when(systemParameterService.isNotificationEmailEnabled(any(SqlClient.class)))
-                .thenReturn(Uni.createFrom().item(enabled));
-        when(systemParameterService.isNotificationSmsEnabled(any(SqlClient.class)))
-                .thenReturn(Uni.createFrom().item(enabled));
-        when(systemParameterService.isNotificationWhatsappEnabled(any(SqlClient.class)))
-                .thenReturn(Uni.createFrom().item(enabled));
+        when(systemParameterService.loadParameter(
+                        any(SqlClient.class), eq(SystemParameterService.PARAM_NOTIFICATION_EMAIL)))
+                .thenReturn(Uni.createFrom().item(Boolean.toString(enabled)));
+        when(systemParameterService.loadParameter(
+                        any(SqlClient.class), eq(SystemParameterService.PARAM_NOTIFICATION_SMS)))
+                .thenReturn(Uni.createFrom().item(Boolean.toString(enabled)));
+        when(systemParameterService.loadParameter(
+                        any(SqlClient.class), eq(SystemParameterService.PARAM_NOTIFICATION_WHATSAPP)))
+                .thenReturn(Uni.createFrom().item(Boolean.toString(enabled)));
     }
 
     /** Stubs the approver lookup to return the supplied staff row. */
@@ -134,15 +164,16 @@ class LeaveNotificationNotifierTest {
     /** Makes every publisher call succeed so the staging chain completes. */
     private void stubPublisherSuccess() {
         lenient()
-                .when(notificationPublisher.enqueueEmail(
-                        any(NotificationTransaction.class), anyString(), anyString(), anyString()))
+                .when(notificationPublisher.enqueueEmailTemplate(
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap()))
                 .thenReturn(Uni.createFrom().voidItem());
         lenient()
-                .when(notificationPublisher.enqueueSms(any(NotificationTransaction.class), anyString(), anyString()))
+                .when(notificationPublisher.enqueueSmsTemplate(
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap()))
                 .thenReturn(Uni.createFrom().voidItem());
         lenient()
                 .when(notificationPublisher.enqueueWhatsappTemplate(
-                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyList()))
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap()))
                 .thenReturn(Uni.createFrom().voidItem());
     }
 

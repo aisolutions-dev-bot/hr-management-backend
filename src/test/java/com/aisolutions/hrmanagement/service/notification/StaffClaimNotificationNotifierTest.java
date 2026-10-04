@@ -18,11 +18,11 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
-import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
@@ -49,6 +49,24 @@ class StaffClaimNotificationNotifierTest {
     private static final String CLAIM_DECISION_TEMPLATE_NAME = "hr_claim_decision_v1";
     private static final String NOTIFICATION_LANGUAGE = "en";
 
+    /** A failed approver parameter lookup aborts staging so the business transaction can roll back. */
+    @Test
+    void propagatesApproverParameterLookupFailure() {
+        when(systemParameterService.loadParameter(
+                        any(SqlClient.class), eq(StaffClaimNotificationNotifier.PARAM_HR_APPROVER)))
+                .thenReturn(Uni.createFrom().failure(new IllegalStateException("parameter database unavailable")));
+
+        assertThrows(
+                IllegalStateException.class,
+                () -> notifier()
+                        .notifyClaimSubmitted(context(), claimDto(), CLAIM_ACTION_SUBMITTED)
+                        .await()
+                        .indefinitely());
+        verify(notificationPublisher, never())
+                .enqueueEmailTemplate(
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
+    }
+
     @Mock
     NotificationPublisher notificationPublisher;
 
@@ -74,15 +92,21 @@ class StaffClaimNotificationNotifierTest {
                 .indefinitely();
 
         verify(notificationPublisher)
-                .enqueueEmail(
+                .enqueueEmailTemplate(
                         any(NotificationTransaction.class),
                         eq(APPROVER_EMAIL),
-                        eq("New staff claim submitted by Alice - JULY-2026"),
-                        contains("SGD 128.00"));
-        verify(notificationPublisher, never()).enqueueSms(any(NotificationTransaction.class), anyString(), anyString());
+                        eq(CLAIM_SUBMITTED_TEMPLATE_NAME),
+                        eq(NOTIFICATION_LANGUAGE),
+                        argThat((Map<String, Object> parameters) -> parameters.get("claimant_name").equals("Alice")
+                                && parameters.get("claim_period").equals(CLAIM_PERIOD)
+                                && parameters.get("amount").equals("SGD 128.00")
+                                && parameters.get("action").equals(CLAIM_ACTION_SUBMITTED)));
+        verify(notificationPublisher, never())
+                .enqueueSmsTemplate(
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
         verify(notificationPublisher, never())
                 .enqueueWhatsappTemplate(
-                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyList());
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
     }
 
     /** Stages the resubmitted subject for a claim whose receipt was resubmitted. */
@@ -101,11 +125,13 @@ class StaffClaimNotificationNotifierTest {
                 .indefinitely();
 
         verify(notificationPublisher)
-                .enqueueEmail(
+                .enqueueEmailTemplate(
                         any(NotificationTransaction.class),
                         eq(APPROVER_EMAIL),
-                        eq("Receipt resubmitted for review by Alice - JULY-2026"),
-                        anyString());
+                        eq(CLAIM_SUBMITTED_TEMPLATE_NAME),
+                        eq(NOTIFICATION_LANGUAGE),
+                        argThat((Map<String, Object> parameters) ->
+                                parameters.get("action").equals(CLAIM_ACTION_RESUBMITTED)));
     }
 
     /** Stages the approved decision template for the claimant when WhatsApp is the only channel on. */
@@ -124,10 +150,13 @@ class StaffClaimNotificationNotifierTest {
                         eq(APPROVER_MOBILE),
                         eq(CLAIM_DECISION_TEMPLATE_NAME),
                         eq(NOTIFICATION_LANGUAGE),
-                        argThat((List<Map<String, Object>> components) -> hasApprovedDecision(components)));
+                        argThat((Map<String, Object> parameters) -> hasApprovedDecision(parameters)));
         verify(notificationPublisher, never())
-                .enqueueEmail(any(NotificationTransaction.class), anyString(), anyString(), anyString());
-        verify(notificationPublisher, never()).enqueueSms(any(NotificationTransaction.class), anyString(), anyString());
+                .enqueueEmailTemplate(
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
+        verify(notificationPublisher, never())
+                .enqueueSmsTemplate(
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
     }
 
     /** Skips every channel when the tenant has them all switched off. */
@@ -142,17 +171,20 @@ class StaffClaimNotificationNotifierTest {
                 .indefinitely();
 
         verify(notificationPublisher, never())
-                .enqueueEmail(any(NotificationTransaction.class), anyString(), anyString(), anyString());
-        verify(notificationPublisher, never()).enqueueSms(any(NotificationTransaction.class), anyString(), anyString());
+                .enqueueEmailTemplate(
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
+        verify(notificationPublisher, never())
+                .enqueueSmsTemplate(
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
         verify(notificationPublisher, never())
                 .enqueueWhatsappTemplate(
-                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyList());
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
     }
 
-    /** Reports whether the rendered components carry the period and approved outcome. */
-    private boolean hasApprovedDecision(List<Map<String, Object>> components) {
-        String renderedComponents = components.toString();
-        return renderedComponents.contains(CLAIM_PERIOD) && renderedComponents.contains(CLAIM_OUTCOME_APPROVED);
+    /** Reports whether registry data carries the period and approved outcome. */
+    private boolean hasApprovedDecision(Map<String, Object> parameters) {
+        return parameters.get("claim_ref").equals(CLAIM_PERIOD)
+                && parameters.get("outcome").equals(CLAIM_OUTCOME_APPROVED);
     }
 
     /** Builds a notifier whose dispatcher shares the stubbed publisher and parameter service. */
@@ -187,12 +219,15 @@ class StaffClaimNotificationNotifierTest {
 
     /** Stubs each tenant channel switch independently. */
     private void stubChannelSwitches(boolean emailEnabled, boolean smsEnabled, boolean whatsappEnabled) {
-        when(systemParameterService.isNotificationEmailEnabled(any(SqlClient.class)))
-                .thenReturn(Uni.createFrom().item(emailEnabled));
-        when(systemParameterService.isNotificationSmsEnabled(any(SqlClient.class)))
-                .thenReturn(Uni.createFrom().item(smsEnabled));
-        when(systemParameterService.isNotificationWhatsappEnabled(any(SqlClient.class)))
-                .thenReturn(Uni.createFrom().item(whatsappEnabled));
+        when(systemParameterService.loadParameter(
+                        any(SqlClient.class), eq(SystemParameterService.PARAM_NOTIFICATION_EMAIL)))
+                .thenReturn(Uni.createFrom().item(Boolean.toString(emailEnabled)));
+        when(systemParameterService.loadParameter(
+                        any(SqlClient.class), eq(SystemParameterService.PARAM_NOTIFICATION_SMS)))
+                .thenReturn(Uni.createFrom().item(Boolean.toString(smsEnabled)));
+        when(systemParameterService.loadParameter(
+                        any(SqlClient.class), eq(SystemParameterService.PARAM_NOTIFICATION_WHATSAPP)))
+                .thenReturn(Uni.createFrom().item(Boolean.toString(whatsappEnabled)));
     }
 
     /** Stubs the recipient staff lookup to return the supplied row. */
@@ -210,15 +245,16 @@ class StaffClaimNotificationNotifierTest {
     /** Makes every publisher call succeed so the staging chain completes. */
     private void stubPublisherSuccess() {
         lenient()
-                .when(notificationPublisher.enqueueEmail(
-                        any(NotificationTransaction.class), anyString(), anyString(), anyString()))
+                .when(notificationPublisher.enqueueEmailTemplate(
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap()))
                 .thenReturn(Uni.createFrom().voidItem());
         lenient()
-                .when(notificationPublisher.enqueueSms(any(NotificationTransaction.class), anyString(), anyString()))
+                .when(notificationPublisher.enqueueSmsTemplate(
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap()))
                 .thenReturn(Uni.createFrom().voidItem());
         lenient()
                 .when(notificationPublisher.enqueueWhatsappTemplate(
-                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyList()))
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap()))
                 .thenReturn(Uni.createFrom().voidItem());
     }
 

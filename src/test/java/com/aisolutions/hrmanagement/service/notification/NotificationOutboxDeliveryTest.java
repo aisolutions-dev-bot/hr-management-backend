@@ -1,5 +1,7 @@
 package com.aisolutions.hrmanagement.service.notification;
 
+import java.util.Map;
+
 import jakarta.inject.Inject;
 
 import com.aisolutions.hrmanagement.testsupport.MySQLTestResource;
@@ -48,19 +50,25 @@ class NotificationOutboxDeliveryTest {
             assertThat(record.key()).isEqualTo(TEST_COMPANY_ID);
             assertThat(event.path("companyId").asText()).isEqualTo(TEST_COMPANY_ID);
             assertThat(event.path("notificationId").asText()).isNotBlank();
-            assertThat(event.path("subject").asText()).isEqualTo("HR outbox delivery test");
-            assertThat(event.path("body").asText()).contains("Committed body");
+            assertThat(event.path("templateName").asText()).isEqualTo("hr_claim_submitted_v1");
+            assertThat(event.path("languageCode").asText()).isEqualTo("en");
+            assertThat(event.path("templateParameters").get("action").asText()).isEqualTo("submitted");
         }
     }
 
     /** Commits one tenant-scoped email on the default pool's business transaction. */
     private void stageTestEmail() {
         defaultPool
-                .withTransaction(transaction -> notificationPublisher.enqueueEmail(
+                .withTransaction(transaction -> notificationPublisher.enqueueEmailTemplate(
                         new NotificationTransaction(transaction, TEST_COMPANY_ID),
                         TEST_RECIPIENT,
-                        "HR outbox delivery test",
-                        "Committed body"))
+                        "hr_claim_submitted_v1",
+                        "en",
+                        Map.of(
+                                "claimant_name", "HR outbox delivery test",
+                                "claim_period", "2026",
+                                "amount", "0.01",
+                                "action", "submitted")))
                 .await()
                 .indefinitely();
     }

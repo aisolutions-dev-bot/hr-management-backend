@@ -1,23 +1,16 @@
 package com.aisolutions.hrmanagement.service.notification;
 
-import java.util.List;
 import java.util.Map;
 
-/** Channel-ready content that the notification dispatcher can stage for one staff recipient. */
+/** Registry template data that the notification dispatcher stages for one staff recipient. */
 public interface HrNotificationChannelContent {
 
-    /** Subject line for the email channel. */
-    String emailSubject();
+    /** Template identity shared by the channel renderers. */
+    String templateName();
 
-    /** Rendered HTML body for the email channel. */
-    String emailBody();
+    /** Language selected by this producer for the notification. */
+    String languageCode();
 
-    /** Plain text for the SMS channel. */
-    String smsText();
-
-    /** Approved WhatsApp template name for the recipient's tenant. */
-    String whatsappTemplateName();
-
-    /** Named body parameters for the WhatsApp template. */
-    List<Map<String, Object>> whatsappTemplateComponents();
+    /** Domain values consumed by the notification registry's channel templates. */
+    Map<String, Object> templateParameters();
 }

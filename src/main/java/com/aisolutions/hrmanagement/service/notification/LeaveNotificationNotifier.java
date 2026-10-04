@@ -1,6 +1,7 @@
 package com.aisolutions.hrmanagement.service.notification;
 
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import jakarta.enterprise.context.ApplicationScoped;
@@ -9,24 +10,24 @@ import jakarta.inject.Inject;
 import com.aisolutions.hrmanagement.entity.LeaveApplication;
 import com.aisolutions.hrmanagement.entity.Staff;
 import com.aisolutions.hrmanagement.repository.StaffRepository;
-import com.aisolutions.hrmanagement.service.leave.LeaveEmailTemplate;
 import com.aisolutions.shared.notification.NotificationTransaction;
 import io.smallrye.mutiny.Uni;
+import org.jboss.logging.Logger;
 
 /**
- * Builds and stages the leave-submitted email, SMS and WhatsApp content for every approver on the
+ * Builds and stages the leave-submitted registry parameters for every approver on the
  * shared notification outbox. Delegates channel switches and staging to
- * {@link HrNotificationChannelDispatcher}, approver reads to {@link StaffRepository} and content
- * rendering to the private {@code renderLeaveContent} helper.
+ * {@link HrNotificationChannelDispatcher}, approver reads to {@link StaffRepository} and registry
+ * parameters to {@link #buildLeaveTemplateContent}.
  */
 @ApplicationScoped
 public class LeaveNotificationNotifier {
 
+    private static final Logger LOG = Logger.getLogger(LeaveNotificationNotifier.class);
+
     private static final String LEAVE_ACTION_CANCEL = "CANCEL";
     private static final String HALF_DAY_AM = "AM";
     private static final String HALF_DAY_PM = "PM";
-    private static final String SUBJECT_SEPARATOR = " - ";
-    private static final String SMS_BRAND_SUFFIX = ". - AI Solutions";
     private static final String WHATSAPP_BLANK_PLACEHOLDER = "-";
     private static final String LEAVE_SUBMITTED_TEMPLATE_NAME = "hr_leave_submitted_v1";
 
@@ -44,7 +45,7 @@ public class LeaveNotificationNotifier {
     public Uni<Void> notifyLeaveSubmitted(
             NotificationTransaction context, LeaveApplication leave, List<String> approverStaffIds) {
         if (approverStaffIds == null || approverStaffIds.isEmpty()) {
-            return Uni.createFrom().voidItem();
+            return recordNotificationSkip(context, "all", leave.getUniqId(), "approvers_missing");
         }
         return notificationChannelDispatcher
                 .loadChannelToggles(context.transaction())
@@ -58,11 +59,12 @@ public class LeaveNotificationNotifier {
             List<String> approverStaffIds,
             HrNotificationChannelToggles toggles) {
         if (!toggles.anyEnabled()) {
-            return Uni.createFrom().voidItem();
+            return recordNotificationSkip(context, "email,sms,whatsapp", leave.getUniqId(), "channels_disabled");
         }
         Uni<Void> chain = Uni.createFrom().voidItem();
         for (String approverStaffId : approverStaffIds) {
             if (isAbsent(approverStaffId)) {
+                recordNotificationSkip(context, "all", leave.getUniqId(), "approver_identifier_missing");
                 continue;
             }
             chain = chain.flatMap(ignored -> queueLeaveApproverChannels(context, leave, approverStaffId, toggles));
@@ -70,27 +72,44 @@ public class LeaveNotificationNotifier {
         return chain;
     }
 
-    /** Resolves one approver, renders the content and delegates staging to the dispatcher. */
+    /** Reads one approver and delegates content staging to {@link #stageLeaveApproverContent}. */
     private Uni<Void> queueLeaveApproverChannels(
             NotificationTransaction context,
             LeaveApplication leave,
             String approverStaffId,
             HrNotificationChannelToggles toggles) {
+        LeaveApproverDispatch dispatch = new LeaveApproverDispatch(context, leave, approverStaffId, toggles);
         return staffRepository
                 .findByStaffId(context.transaction(), approverStaffId)
-                .onFailure()
-                .recoverWithItem((Staff) null)
-                .flatMap(approverStaff -> {
-                    if (approverStaff == null) {
-                        return Uni.createFrom().voidItem();
-                    }
-                    LeaveNotificationContent content = renderLeaveContent(leave, approverStaff, approverStaffId);
-                    return notificationChannelDispatcher.stageStaffChannels(context, toggles, approverStaff, content);
-                });
+                .flatMap(approverStaff -> stageLeaveApproverContent(dispatch, approverStaff));
     }
 
-    /** Renders the leave subject, email HTML, SMS text and WhatsApp parameters for one approver. */
-    private LeaveNotificationContent renderLeaveContent(
+    /** Audits absent staff or delegates rendered content to the shared channel dispatcher. */
+    private Uni<Void> stageLeaveApproverContent(LeaveApproverDispatch dispatch, Staff approverStaff) {
+        if (approverStaff == null) {
+            return recordNotificationSkip(
+                    dispatch.context(), "all", dispatch.leave().getUniqId(), "staff_missing");
+        }
+        LeaveNotificationContent content =
+                buildLeaveTemplateContent(dispatch.leave(), approverStaff, dispatch.approverStaffId());
+        return notificationChannelDispatcher.stageStaffChannels(
+                new HrNotificationChannelDispatcher.StaffChannelDispatch(
+                        dispatch.context(),
+                        dispatch.toggles(),
+                        approverStaff,
+                        content,
+                        dispatch.leave().getUniqId()));
+    }
+
+    /** Carries the leave identity and channel switches through approver resolution. */
+    private record LeaveApproverDispatch(
+            NotificationTransaction context,
+            LeaveApplication leave,
+            String approverStaffId,
+            HrNotificationChannelToggles toggles) {}
+
+    /** Builds the registry parameter map for the leave-submitted template. */
+    private LeaveNotificationContent buildLeaveTemplateContent(
             LeaveApplication leave, Staff approverStaff, String approverStaffId) {
         boolean cancelled = LEAVE_ACTION_CANCEL.equals(leave.getLeaveAction());
         LeaveSubmissionSummary summary = new LeaveSubmissionSummary(
@@ -99,51 +118,16 @@ public class LeaveNotificationNotifier {
                 leavePeriodText(leave),
                 cancelled);
         String approverName = displayName(approverStaff.getName(), approverStaffId);
-        return new LeaveNotificationContent(
-                leaveSubject(summary),
-                leaveEmailBody(approverName, summary, leave.getRemarks()),
-                leaveSmsText(summary),
-                LEAVE_SUBMITTED_TEMPLATE_NAME,
-                leaveWhatsappTemplateComponents(approverName, summary));
-    }
-
-    /** Builds the subject line the original leave notification used. */
-    private String leaveSubject(LeaveSubmissionSummary summary) {
-        String prefix = summary.cancelled() ? "Leave cancellation request from " : "Leave application from ";
-        return prefix + summary.applicantName() + SUBJECT_SEPARATOR + summary.leaveType();
-    }
-
-    /** Renders the leave email body through the existing template. */
-    private String leaveEmailBody(String approverName, LeaveSubmissionSummary summary, String remarks) {
-        return LeaveEmailTemplate.buildSubmittedEmail(
-                approverName,
-                summary.applicantName(),
-                summary.leaveType(),
-                summary.periodText(),
-                summary.cancelled(),
-                remarks);
-    }
-
-    /** Builds the SMS text the original leave notification used. */
-    private String leaveSmsText(LeaveSubmissionSummary summary) {
-        String prefix = summary.cancelled() ? "Leave cancellation request from " : "Leave application from ";
-        return prefix
-                + summary.applicantName()
-                + SUBJECT_SEPARATOR
-                + summary.leaveType()
-                + summary.periodText()
-                + SMS_BRAND_SUFFIX;
-    }
-
-    /** Builds the named WhatsApp body parameters for the leave-submitted template. */
-    private List<Map<String, Object>> leaveWhatsappTemplateComponents(
-            String approverName, LeaveSubmissionSummary summary) {
-        String whatsappLeaveType = summary.cancelled() ? summary.leaveType() + " (cancellation)" : summary.leaveType();
-        return bodyParameters(List.of(
-                namedParameter("approver_name", whatsappValue(approverName)),
-                namedParameter("applicant_name", whatsappValue(summary.applicantName())),
-                namedParameter("leave_type", whatsappValue(whatsappLeaveType)),
-                namedParameter("period", whatsappValue(summary.periodText().trim()))));
+        Map<String, Object> parameters = new LinkedHashMap<>();
+        parameters.put("approver_name", whatsappValue(approverName));
+        parameters.put("applicant_name", whatsappValue(summary.applicantName()));
+        parameters.put(
+                "leave_type",
+                whatsappValue(summary.cancelled() ? summary.leaveType() + " (cancellation)" : summary.leaveType()));
+        parameters.put("period", whatsappValue(summary.periodText().trim()));
+        parameters.put("action", summary.cancelled() ? "cancelled" : "submitted");
+        parameters.put("remarks", nz(leave.getRemarks()));
+        return new LeaveNotificationContent(LEAVE_SUBMITTED_TEMPLATE_NAME, parameters);
     }
 
     /** Builds the human-readable leave period text the original notification used. */
@@ -185,14 +169,13 @@ public class LeaveNotificationNotifier {
         return value == null ? "" : value;
     }
 
-    /** Wraps named parameters in the Meta body component shape. */
-    private List<Map<String, Object>> bodyParameters(List<Map<String, Object>> parameters) {
-        return List.of(Map.of("type", "body", "parameters", parameters));
-    }
-
-    /** Preserves the specification-defined parameter_name and text wire fields. */
-    private Map<String, Object> namedParameter(String parameterName, String value) {
-        return Map.of("type", "text", "parameter_name", parameterName, "text", value == null ? "" : value);
+    /** Records an intentional skip without recipient contact information. */
+    private Uni<Void> recordNotificationSkip(
+            NotificationTransaction context, String channel, Object businessIdentity, String reason) {
+        LOG.warnf(
+                "notification_skipped company_id=%s channel=%s business_identity=%s reason=%s",
+                context.companyId(), channel, businessIdentity, reason);
+        return Uni.createFrom().voidItem();
     }
 
     /** Identifies absent staff identifiers and contacts. */
@@ -200,14 +183,15 @@ public class LeaveNotificationNotifier {
         return value == null || value.isBlank();
     }
 
-    /** The channel-ready leave content shared by the email, SMS and WhatsApp channels. */
-    private record LeaveNotificationContent(
-            String emailSubject,
-            String emailBody,
-            String smsText,
-            String whatsappTemplateName,
-            List<Map<String, Object>> whatsappTemplateComponents)
-            implements HrNotificationChannelContent {}
+    /** Carries the registry template and parameter map shared by channel producers. */
+    private record LeaveNotificationContent(String templateName, Map<String, Object> templateParameters)
+            implements HrNotificationChannelContent {
+
+        @Override
+        public String languageCode() {
+            return "en";
+        }
+    }
 
     /** The applicant-facing facts the leave subject, email, SMS and WhatsApp content share. */
     private record LeaveSubmissionSummary(
