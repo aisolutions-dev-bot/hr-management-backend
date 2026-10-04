@@ -1,0 +1,38 @@
+#!/usr/bin/env sh
+# Requires a JobTasks ticket and Conventional Commit subject on every commit.
+
+set -e
+
+MESSAGE_FILE="$1"
+SUBJECT=$(head -1 "$MESSAGE_FILE")
+
+case "$SUBJECT" in
+    "Merge "* | "Revert "*)
+        exit 0
+        ;;
+esac
+
+TYPES="build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test"
+PATTERN="^\\[JT-[0-9]{4}-[0-9]{3,}\\] (${TYPES})\\([a-z0-9._/-]+\\)!?: [a-z][^.!?]*$"
+
+if ! printf '%s' "$SUBJECT" | grep -qE "$PATTERN"; then
+    printf 'Commit subject must include a JT ticket and follow Conventional Commits.\n\n'
+    printf '  [JT-YYYY-NNN] <type>(<scope>): <lowercase imperative subject>\n'
+    printf '  Allowed types: %s\n' "$(printf '%s' "$TYPES" | tr '|' ' ')"
+    printf '  Subject must have no trailing punctuation.\n\n'
+    printf 'Got: %s\n' "$SUBJECT"
+    exit 1
+fi
+
+CONVENTIONAL_SUBJECT=$(printf '%s' "$SUBJECT" | sed 's/^\[JT-[0-9]*-[0-9]*\] //')
+LOWERCASE_SUBJECT=$(printf '%s' "$CONVENTIONAL_SUBJECT" | tr '[:upper:]' '[:lower:]')
+if [ "$CONVENTIONAL_SUBJECT" != "$LOWERCASE_SUBJECT" ]; then
+    printf 'The Conventional Commit subject must be lowercase.\n'
+    exit 1
+fi
+
+LENGTH=${#SUBJECT}
+if [ "$LENGTH" -gt 72 ]; then
+    printf 'Commit subject is %s characters. The limit is 72.\n' "$LENGTH"
+    exit 1
+fi

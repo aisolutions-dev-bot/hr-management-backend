@@ -5,6 +5,7 @@ import com.aisolutions.hrmanagement.service.attachment.FtpConfig;
 import com.aisolutions.shared.tenancy.CompanyPoolManager;
 
 import io.smallrye.mutiny.Uni;
+import io.vertx.mutiny.sqlclient.SqlClient;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -148,6 +149,13 @@ public class SystemParameterService {
             .map(params -> params.get(name));
     }
 
+    /** As {@link #loadParameter(String)} but on the business transaction's connection, so the
+     *  parameter read stays inside the enclosing notification-staging transaction. */
+    public Uni<String> loadParameter(SqlClient client, String name) {
+        return systemParameterRepository.getParameterMap(client, List.of(name))
+            .map(params -> params.get(name));
+    }
+
     /**
      * Whether leave-notification emails are switched on, from the NOTIFICATION-EMAIL
      * parameter. Uncached so a toggle change takes effect immediately; a missing row or
@@ -176,6 +184,27 @@ public class SystemParameterService {
     /** As {@link #isNotificationEmailEnabled(io.vertx.mutiny.sqlclient.Pool)} but for NOTIFICATION-WHATSAPP. */
     public Uni<Boolean> isNotificationWhatsappEnabled(io.vertx.mutiny.sqlclient.Pool pool) {
         return loadParameter(pool, PARAM_NOTIFICATION_WHATSAPP)
+            .map(SystemParameterService::truthy)
+            .onFailure().recoverWithItem(false);
+    }
+
+    /** As {@link #isNotificationEmailEnabled(io.vertx.mutiny.sqlclient.Pool)} but on the transaction. */
+    public Uni<Boolean> isNotificationEmailEnabled(SqlClient client) {
+        return loadParameter(client, PARAM_NOTIFICATION_EMAIL)
+            .map(SystemParameterService::truthy)
+            .onFailure().recoverWithItem(false);
+    }
+
+    /** As {@link #isNotificationSmsEnabled(io.vertx.mutiny.sqlclient.Pool)} but on the transaction. */
+    public Uni<Boolean> isNotificationSmsEnabled(SqlClient client) {
+        return loadParameter(client, PARAM_NOTIFICATION_SMS)
+            .map(SystemParameterService::truthy)
+            .onFailure().recoverWithItem(false);
+    }
+
+    /** As {@link #isNotificationWhatsappEnabled(io.vertx.mutiny.sqlclient.Pool)} but on the transaction. */
+    public Uni<Boolean> isNotificationWhatsappEnabled(SqlClient client) {
+        return loadParameter(client, PARAM_NOTIFICATION_WHATSAPP)
             .map(SystemParameterService::truthy)
             .onFailure().recoverWithItem(false);
     }

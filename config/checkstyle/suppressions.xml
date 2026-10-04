@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<!DOCTYPE suppressions PUBLIC
+    "-//Checkstyle//DTD SuppressionFilter Configuration 1.2//EN"
+    "https://checkstyle.org/dtds/suppressions_1_2.dtd">
+
+<!--
+  Baseline suppressions captured 2026-10-02 when Checkstyle was introduced (see
+  docs/development/linting-and-formatting.md). These files predate the linting SOP and
+  are tracked as tech debt per docs/development/overview.md ("existing violations are
+  tracked as tech debt, not fixed immediately"). Do not add new files here: any file
+  touched after this baseline must pass Checkstyle in full. Remove an entry once the
+  file is refactored to comply, instead of widening it.
+-->
+<suppressions>
+</suppressions>

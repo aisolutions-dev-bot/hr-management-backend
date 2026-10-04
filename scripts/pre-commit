@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+# Verifies staged work without rewriting files or changing the selected commit contents.
+
+set -e
+
+./gradlew spotlessCheck checkstyleMain checkstyleTest pmdMain pmdTest -q

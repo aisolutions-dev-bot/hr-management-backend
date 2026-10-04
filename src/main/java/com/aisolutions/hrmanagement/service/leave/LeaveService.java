@@ -21,17 +21,16 @@ import com.aisolutions.hrmanagement.repository.LeavePolicyRepository.AdvancePoli
 import com.aisolutions.hrmanagement.repository.StaffRepository;
 import com.aisolutions.hrmanagement.service.approval.ApprovalFlowService;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
-import com.aisolutions.hrmanagement.service.SystemParameterService;
-import com.aisolutions.hrmanagement.service.email.EmailNotificationService;
-import com.aisolutions.hrmanagement.service.sms.SmsNotificationService;
-import com.aisolutions.hrmanagement.service.whatsapp.WhatsappNotificationService;
+import com.aisolutions.hrmanagement.service.notification.LeaveNotificationNotifier;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService.DeviceInfo;
 import com.aisolutions.shared.tenancy.CompanyPoolManager;
+import com.aisolutions.shared.notification.NotificationTransaction;
 import com.aisolutions.shared.util.DateUtil;
 
 import io.smallrye.mutiny.Uni;
 import io.vertx.mutiny.sqlclient.Row;
+import io.vertx.mutiny.sqlclient.SqlClient;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.NotFoundException;
@@ -78,10 +77,7 @@ public class LeaveService {
     @Inject UserActionLogService userActionLogService;
     @Inject NotificationRepository notificationRepo;
     @Inject CompanyPoolManager companyPoolManager;
-    @Inject SystemParameterService systemParameterService;
-    @Inject EmailNotificationService emailNotificationService;
-    @Inject SmsNotificationService smsNotificationService;
-    @Inject WhatsappNotificationService whatsappNotificationService;
+    @Inject LeaveNotificationNotifier leaveNotificationNotifier;
     @Inject ApprovalFlowService approvalFlowService;
 
     /** Step 1 prefill: the current user's name + department (locked fields). */
@@ -462,27 +458,40 @@ public class LeaveService {
                 })));
     }
 
+    /**
+     * Commits the leave, its frozen flow snapshot and every staged notification in one
+     * transaction, then records the audit log and in-app bell. Delegates staging to
+     * {@link LeaveNotificationNotifier}, persistence to {@link #saveLeaveWithSnapshot} and the
+     * per-approver bell to {@link #notifyApprovers}.
+     */
     private Uni<LeaveApplicationDTO> saveAndNotify(io.vertx.mutiny.sqlclient.Pool pool,
                                                     LeaveApplication entity, DeviceInfo deviceInfo) {
-        return pool.withTransaction(tx -> leaveRepo.save(tx, entity)
-                // Freeze the current flow onto this leave so later flow edits won't affect it.
-                .flatMap(saved -> approvalFlowService.snapshotAtSubmit(tx, saved.getUniqId(),
-                            saved.getDepartment(),
-                            saved.getEntryStaff() != null ? saved.getEntryStaff() : saved.getStaffId(),
-                            DateUtil.nowSGT())
-                        .replaceWith(saved)))
-            .flatMap(saved -> logSubmit(saved, deviceInfo).replaceWith(saved))
-            .flatMap(saved -> resolveSubmitRecipients(pool, saved)
-                .call(recipients -> notifyApprovers(saved, recipients))
-                // Email/SMS are fire-and-forget on the tenant pool so the response never waits
-                // on the provider.
-                .invoke(recipients -> {
-                    emailApprovers(pool, saved, recipients).subscribe().with(ignored -> {}, err -> {});
-                    smsApprovers(pool, saved, recipients).subscribe().with(ignored -> {}, err -> {});
-                    whatsappApprovers(pool, saved, recipients).subscribe().with(ignored -> {}, err -> {});
-                })
-                .replaceWith(saved))
+        String companyId = currentUserService.getCurrentCompanyId();
+        return pool.withTransaction(tx -> saveLeaveWithSnapshot(tx, entity)
+                .flatMap(saved -> resolveSubmitRecipients(tx, saved)
+                        .flatMap(recipients -> stageLeaveSubmittedNotifications(tx, saved, recipients, companyId)
+                                .replaceWith(new SubmittedLeave(saved, recipients)))))
+            .flatMap(submitted -> logSubmit(submitted.leave(), deviceInfo)
+                    .flatMap(ignored -> notifyApprovers(submitted.leave(), submitted.recipients()))
+                    .replaceWith(submitted.leave()))
             .flatMap(saved -> getOne(saved.getUniqId()));
+    }
+
+    /** Saves the leave and freezes the resolved approval flow onto it in the same transaction. */
+    private Uni<LeaveApplication> saveLeaveWithSnapshot(SqlClient tx, LeaveApplication entity) {
+        return leaveRepo.save(tx, entity)
+            .flatMap(saved -> approvalFlowService.snapshotAtSubmit(tx, saved.getUniqId(),
+                        saved.getDepartment(),
+                        saved.getEntryStaff() != null ? saved.getEntryStaff() : saved.getStaffId(),
+                        DateUtil.nowSGT())
+                    .replaceWith(saved));
+    }
+
+    /** Delegates leave envelope construction and staging to {@link LeaveNotificationNotifier}. */
+    private Uni<Void> stageLeaveSubmittedNotifications(SqlClient tx, LeaveApplication saved,
+                                                       List<String> recipients, String companyId) {
+        return leaveNotificationNotifier.notifyLeaveSubmitted(
+                new NotificationTransaction(tx, companyId), saved, recipients);
     }
 
     /**
@@ -759,142 +768,6 @@ public class LeaveService {
         }).onFailure().recoverWithItem((Void) null);
     }
 
-    /**
-     * Emails each pending approver the same "please review and approve" message as
-     * the in-app bell, gated once by the NOTIFICATION-EMAIL parameter (and per
-     * approver by having an email on file). Best-effort: any failure is swallowed
-     * so a mail problem never affects the submission.
-     */
-    private Uni<Void> emailApprovers(io.vertx.mutiny.sqlclient.Pool pool, LeaveApplication e,
-                                     List<String> recipients) {
-        if (recipients == null || recipients.isEmpty()) {
-            return Uni.createFrom().voidItem();
-        }
-        return systemParameterService.isNotificationEmailEnabled(pool).flatMap(enabled -> {
-            if (!Boolean.TRUE.equals(enabled)) {
-                return Uni.createFrom().voidItem();
-            }
-            Uni<Void> chain = Uni.createFrom().voidItem();
-            for (String approver : recipients) {
-                if (approver == null || approver.isBlank()) continue;
-                chain = chain.flatMap(v -> emailOneApprover(pool, e, approver));
-            }
-            return chain;
-        }).onFailure().recoverWithItem((Void) null);
-    }
-
-    /** Sends the submit email to one approver; NOTIFICATION-EMAIL gating is done by the caller. */
-    private Uni<Void> emailOneApprover(io.vertx.mutiny.sqlclient.Pool pool, LeaveApplication e, String approver) {
-        return staffRepo.findByStaffId(pool, approver).flatMap(approverStaff -> {
-            String email = approverStaff != null ? approverStaff.getEmailCompany() : null;
-            if (email == null || email.isBlank()) {
-                return Uni.createFrom().voidItem();
-            }
-            String who = (e.getStaffName() != null && !e.getStaffName().isBlank())
-                    ? e.getStaffName() : e.getStaffId();
-            String approverName = (approverStaff.getName() != null && !approverStaff.getName().isBlank())
-                    ? approverStaff.getName() : approver;
-            boolean cancel = ACTION_CANCEL.equals(e.getLeaveAction());
-            String subject = (cancel ? "Leave cancellation request from " : "Leave application from ")
-                    + who + " - " + nz(e.getLeaveType());
-            String html = LeaveEmailTemplate.buildSubmittedEmail(
-                    approverName, who, nz(e.getLeaveType()), periodText(e), cancel, e.getRemarks());
-            return emailNotificationService.sendReactive(email, subject, html).replaceWithVoid();
-        }).onFailure().recoverWithItem((Void) null);
-    }
-
-    /** SMS counterpart of {@link #emailApprovers} — NOTIFICATION-SMS gated once. */
-    private Uni<Void> smsApprovers(io.vertx.mutiny.sqlclient.Pool pool, LeaveApplication e,
-                                   List<String> recipients) {
-        if (recipients == null || recipients.isEmpty()) {
-            return Uni.createFrom().voidItem();
-        }
-        return systemParameterService.isNotificationSmsEnabled(pool).flatMap(enabled -> {
-            if (!Boolean.TRUE.equals(enabled)) {
-                System.err.println("[SMS] leave-submitted skipped for leave " + e.getUniqId()
-                        + ": NOTIFICATION-SMS is off");
-                return Uni.createFrom().voidItem();
-            }
-            Uni<Void> chain = Uni.createFrom().voidItem();
-            for (String approver : recipients) {
-                if (approver == null || approver.isBlank()) continue;
-                chain = chain.flatMap(v -> smsOneApprover(pool, e, approver));
-            }
-            return chain;
-        }).onFailure().recoverWithItem((Void) null);
-    }
-
-    /** Sends the submit SMS to one approver; NOTIFICATION-SMS gating is done by the caller. */
-    private Uni<Void> smsOneApprover(io.vertx.mutiny.sqlclient.Pool pool, LeaveApplication e, String approver) {
-        return staffRepo.findByStaffId(pool, approver).flatMap(approverStaff -> {
-            String mobile = approverStaff != null ? approverStaff.getTelMobile() : null;
-            if (mobile == null || mobile.isBlank()) {
-                System.err.println("[SMS] leave-submitted skipped for leave " + e.getUniqId()
-                        + ": approver " + approver + " has no TelMobile");
-                return Uni.createFrom().voidItem();
-            }
-            String who = (e.getStaffName() != null && !e.getStaffName().isBlank())
-                    ? e.getStaffName() : e.getStaffId();
-            boolean cancel = ACTION_CANCEL.equals(e.getLeaveAction());
-            String text = (cancel ? "Leave cancellation request from " : "Leave application from ")
-                    + who + " - " + nz(e.getLeaveType()) + periodText(e) + ". - AI Solutions";
-            System.err.println("[SMS] leave-submitted sending to " + mobile + " for leave " + e.getUniqId());
-            return smsNotificationService.sendReactive(mobile, text)
-                    .invoke(sent -> System.err.println("[SMS] leave-submitted send "
-                            + (sent ? "OK" : "FAILED") + " to " + mobile + " for leave " + e.getUniqId()))
-                    .replaceWithVoid();
-        }).onFailure().invoke(err -> System.err.println(
-                "[SMS] leave-submitted send failed for leave " + e.getUniqId() + ": " + err))
-          .onFailure().recoverWithItem((Void) null);
-    }
-
-    /** WhatsApp counterpart of {@link #smsApprovers} — NOTIFICATION-WHATSAPP gated once. */
-    private Uni<Void> whatsappApprovers(io.vertx.mutiny.sqlclient.Pool pool, LeaveApplication e,
-                                        List<String> recipients) {
-        if (recipients == null || recipients.isEmpty()) {
-            return Uni.createFrom().voidItem();
-        }
-        return systemParameterService.isNotificationWhatsappEnabled(pool).flatMap(enabled -> {
-            if (!Boolean.TRUE.equals(enabled)) {
-                System.err.println("[WhatsApp] leave-submitted skipped for leave " + e.getUniqId()
-                        + ": NOTIFICATION-WHATSAPP is off");
-                return Uni.createFrom().voidItem();
-            }
-            Uni<Void> chain = Uni.createFrom().voidItem();
-            for (String approver : recipients) {
-                if (approver == null || approver.isBlank()) continue;
-                chain = chain.flatMap(v -> whatsappOneApprover(pool, e, approver));
-            }
-            return chain;
-        }).onFailure().recoverWithItem((Void) null);
-    }
-
-    /** Sends the submit WhatsApp to one approver; NOTIFICATION-WHATSAPP gating is done by the caller. */
-    private Uni<Void> whatsappOneApprover(io.vertx.mutiny.sqlclient.Pool pool, LeaveApplication e, String approver) {
-        return staffRepo.findByStaffId(pool, approver).flatMap(approverStaff -> {
-            String mobile = approverStaff != null ? approverStaff.getTelMobile() : null;
-            if (mobile == null || mobile.isBlank()) {
-                System.err.println("[WhatsApp] leave-submitted skipped for leave " + e.getUniqId()
-                        + ": approver " + approver + " has no TelMobile");
-                return Uni.createFrom().voidItem();
-            }
-            String who = (e.getStaffName() != null && !e.getStaffName().isBlank())
-                    ? e.getStaffName() : e.getStaffId();
-            String approverName = (approverStaff.getName() != null && !approverStaff.getName().isBlank())
-                    ? approverStaff.getName() : approver;
-            boolean cancel = ACTION_CANCEL.equals(e.getLeaveAction());
-            String leaveType = cancel ? nz(e.getLeaveType()) + " (cancellation)" : nz(e.getLeaveType());
-            System.err.println("[WhatsApp] leave-submitted sending to " + mobile + " for leave " + e.getUniqId());
-            return whatsappNotificationService.sendLeaveSubmitted(mobile, approverName, who,
-                    leaveType, periodText(e).trim())
-                    .invoke(sent -> System.err.println("[WhatsApp] leave-submitted send "
-                            + (sent ? "OK" : "FAILED") + " to " + mobile + " for leave " + e.getUniqId()))
-                    .replaceWithVoid();
-        }).onFailure().invoke(err -> System.err.println(
-                "[WhatsApp] leave-submitted send failed for leave " + e.getUniqId() + ": " + err))
-          .onFailure().recoverWithItem((Void) null);
-    }
-
     private Uni<String> resolveStaffId(String requestedStaffId) {
         return currentUserService.getCurrentUser().flatMap(user -> {
             String staffId = (user != null && user.getStaffId() != null
@@ -937,6 +810,9 @@ public class LeaveService {
         }
         return base;
     }
+
+    /** A committed leave plus the approvers resolved for its notifications. */
+    private record SubmittedLeave(LeaveApplication leave, List<String> recipients) {}
 
     private LeaveApplicationDTO toDtoBasic(LeaveApplication e) {
         LeaveApplicationDTO dto = new LeaveApplicationDTO();

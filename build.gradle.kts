@@ -1,6 +1,12 @@
+import java.security.MessageDigest
+
 plugins {
     java
     id("io.quarkus")
+    id("com.diffplug.spotless") version "8.10.2"
+    checkstyle
+    pmd
+    jacoco
 }
 
 repositories {
@@ -40,16 +46,27 @@ dependencies {
     implementation("io.quarkus:quarkus-cache")
     // Kafka messaging + jackson serializer
     implementation("io.quarkus:quarkus-messaging-kafka")
+    // Drives the shared notification outbox relay's @Scheduled poll
+    implementation("io.quarkus:quarkus-scheduler")
     implementation("io.quarkus:quarkus-jackson")
     // Lombok
     compileOnly("org.projectlombok:lombok:1.18.42")
     annotationProcessor("org.projectlombok:lombok:1.18.42")
 
     testImplementation("io.quarkus:quarkus-junit5")
+    testImplementation("io.quarkus:quarkus-junit5-mockito")
+    testImplementation("io.quarkus:quarkus-test-security-jwt")
     testImplementation("io.rest-assured:rest-assured")
+    testImplementation("org.assertj:assertj-core:3.27.3")
+    testImplementation("org.testcontainers:mysql")
+    testImplementation("org.testcontainers:kafka")
+    testImplementation("org.testcontainers:junit-jupiter")
+    // Testcontainers' own JDBC readiness check needs a blocking JDBC driver on the
+    // classpath — the app itself only ever uses the reactive Vert.x MySQL client.
+    testRuntimeOnly("com.mysql:mysql-connector-j:9.4.0")
 
     // MavenLocal
-    implementation("com.aisolutions:ai-solutions-java-shared:0.2.8")
+    implementation("com.aisolutions:ai-solutions-java-shared:0.6.0")
 
     // Google API Client Libraries
     implementation("com.google.api-client:google-api-client:2.8.0")
@@ -91,4 +108,77 @@ tasks.withType<JavaCompile> {
 tasks.withType<JavaCompile>().configureEach {
     options.compilerArgs.add("-Xlint:deprecation")
     options.isDeprecation = true
+}
+
+// Only unchanged legacy Java files remain exempt while conventions are adopted.
+val legacyJavaBaseline = file("config/conventions/legacy-java-baseline.tsv")
+    .readLines()
+    .filter { it.isNotBlank() && !it.startsWith("#") }
+    .groupBy { line -> line.substringAfter('\t') }
+    .mapValues { (_, entries) -> entries.map { line -> line.substringBefore('\t') }.toSet() }
+val javaFilesRequiringConventions = files(provider {
+    fileTree("src") { include("**/*.java") }.files.filter { sourceFile ->
+        val sourcePath = sourceFile.relativeTo(projectDir).invariantSeparatorsPath
+        val currentDigest = MessageDigest.getInstance("SHA-256")
+            .digest(sourceFile.readBytes()).joinToString("") { "%02x".format(it) }
+        currentDigest !in legacyJavaBaseline[sourcePath].orEmpty()
+    }
+})
+
+spotless {
+    java {
+        target(javaFilesRequiringConventions)
+        palantirJavaFormat("2.97.0")
+        removeUnusedImports()
+        // "\\#" catches static imports; placing it last matches checkstyle.xml's
+        // ImportOrder option="bottom" — otherwise spotlessApply and checkstyleCheck
+        // fight over static-import placement on every file that has any.
+        importOrder("java", "javax", "jakarta", "", "org.acme", "\\#")
+    }
+}
+
+checkstyle {
+    toolVersion = "14.1.0"
+    configFile = file("config/checkstyle/checkstyle.xml")
+    isIgnoreFailures = false
+}
+
+pmd {
+    toolVersion = "7.27.0"
+    ruleSetFiles = files("config/pmd/ruleset.xml")
+    ruleSets = emptyList()
+    isIgnoreFailures = false
+}
+
+jacoco {
+    toolVersion = "0.8.15"
+}
+
+tasks.jacocoTestReport {
+    dependsOn(tasks.test)
+    reports {
+        xml.required.set(true)
+        html.required.set(true)
+    }
+}
+
+tasks.test {
+    finalizedBy(tasks.jacocoTestReport)
+}
+
+tasks.withType<Checkstyle>().configureEach {
+    setSource(javaFilesRequiringConventions.filter { it.path.contains("/src/${if (name == "checkstyleTest") "test" else "main"}/") })
+}
+
+tasks.withType<Pmd>().configureEach {
+    setSource(javaFilesRequiringConventions.filter { it.path.contains("/src/${if (name == "pmdTest") "test" else "main"}/") })
+}
+
+tasks.register<Copy>("installGitHooks") {
+    from("scripts/pre-commit", "scripts/commit-msg")
+    into(".git/hooks")
+    doLast {
+        file(".git/hooks/pre-commit").setExecutable(true)
+        file(".git/hooks/commit-msg").setExecutable(true)
+    }
 }
