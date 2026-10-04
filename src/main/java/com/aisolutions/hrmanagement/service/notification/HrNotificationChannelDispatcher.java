@@ -129,7 +129,11 @@ public class HrNotificationChannelDispatcher {
             return recordDispatchSkip(dispatch, "whatsapp", "content_missing");
         }
         return notificationPublisher.enqueueWhatsappTemplate(
-                dispatch.context(), recipient, content.templateName(), content.languageCode(), content.templateParameters());
+                dispatch.context(),
+                recipient,
+                content.templateName(),
+                content.languageCode(),
+                content.templateParameters());
     }
 
     /** Records an intentional skip using the dispatch's tenant and business identity. */

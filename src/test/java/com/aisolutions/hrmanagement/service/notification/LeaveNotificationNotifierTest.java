@@ -56,7 +56,8 @@ class LeaveNotificationNotifierTest {
                         .await()
                         .indefinitely());
         verify(notificationPublisher, never())
-                .enqueueEmailTemplate(any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
+                .enqueueEmailTemplate(
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
     }
 
     @Mock
@@ -86,17 +87,19 @@ class LeaveNotificationNotifierTest {
                         eq(APPROVER_EMAIL),
                         eq(LEAVE_TEMPLATE_NAME),
                         eq(NOTIFICATION_LANGUAGE),
-                        argThat((Map<String, Object> parameters) -> parameters.get("approver_name").equals(APPROVER_NAME)
-                                && parameters.get("applicant_name").equals(APPLICANT_NAME)
-                                && parameters.get("action").equals("submitted")));
+                        argThat((Map<String, Object> parameters) ->
+                                parameters.get("approver_name").equals(APPROVER_NAME)
+                                        && parameters.get("applicant_name").equals(APPLICANT_NAME)
+                                        && parameters.get("action").equals("submitted")));
         verify(notificationPublisher)
                 .enqueueSmsTemplate(
                         any(NotificationTransaction.class),
                         eq(APPROVER_MOBILE),
                         eq(LEAVE_TEMPLATE_NAME),
                         eq(NOTIFICATION_LANGUAGE),
-                        argThat((Map<String, Object> parameters) -> parameters.get("applicant_name").equals(APPLICANT_NAME)
-                                && parameters.get("period").toString().contains("2026-09-10")));
+                        argThat((Map<String, Object> parameters) ->
+                                parameters.get("applicant_name").equals(APPLICANT_NAME)
+                                        && parameters.get("period").toString().contains("2026-09-10")));
         verify(notificationPublisher)
                 .enqueueWhatsappTemplate(
                         any(NotificationTransaction.class),
@@ -120,7 +123,8 @@ class LeaveNotificationNotifierTest {
                 .enqueueEmailTemplate(
                         any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
         verify(notificationPublisher, never())
-                .enqueueSmsTemplate(any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
+                .enqueueSmsTemplate(
+                        any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
         verify(notificationPublisher, never())
                 .enqueueWhatsappTemplate(
                         any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());

@@ -1,7 +1,6 @@
 package com.aisolutions.hrmanagement.service.notification;
 
 import java.math.BigDecimal;
-import java.util.List;
 import java.util.Map;
 
 import com.aisolutions.hrmanagement.dto.StaffClaimDTO;
@@ -38,6 +37,7 @@ class StaffClaimNotificationNotifierTest {
     private static final String APPROVER_EMAIL = "approver@example.com";
     private static final String APPROVER_MOBILE = "+60123456789";
     private static final String SUBMITTER_ID = "SUBMITTER-1";
+    private static final String SUBMITTER_NAME = "Alice";
     private static final String CLAIMANT_ID = "CLAIMANT-1";
     private static final String CLAIM_PERIOD = "JULY-2026";
     private static final BigDecimal CLAIM_AMOUNT = new BigDecimal("128.00");
@@ -83,7 +83,7 @@ class StaffClaimNotificationNotifierTest {
         stubChannelSwitches(true, false, false);
         stubBaseCurrency(BASE_CURRENCY);
         stubStaffLookup(APPROVER_ID, approver());
-        stubSubmitterName(SUBMITTER_ID, "Alice");
+        stubSubmitterName(SUBMITTER_ID, SUBMITTER_NAME);
         stubPublisherSuccess();
 
         notifier()
@@ -97,10 +97,11 @@ class StaffClaimNotificationNotifierTest {
                         eq(APPROVER_EMAIL),
                         eq(CLAIM_SUBMITTED_TEMPLATE_NAME),
                         eq(NOTIFICATION_LANGUAGE),
-                        argThat((Map<String, Object> parameters) -> parameters.get("claimant_name").equals("Alice")
-                                && parameters.get("claim_period").equals(CLAIM_PERIOD)
-                                && parameters.get("amount").equals("SGD 128.00")
-                                && parameters.get("action").equals(CLAIM_ACTION_SUBMITTED)));
+                        argThat((Map<String, Object> parameters) ->
+                                parameters.get("claimant_name").equals(SUBMITTER_NAME)
+                                        && parameters.get("claim_period").equals(CLAIM_PERIOD)
+                                        && parameters.get("amount").equals("SGD 128.00")
+                                        && parameters.get("action").equals(CLAIM_ACTION_SUBMITTED)));
         verify(notificationPublisher, never())
                 .enqueueSmsTemplate(
                         any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
@@ -116,7 +117,7 @@ class StaffClaimNotificationNotifierTest {
         stubChannelSwitches(true, false, false);
         stubBaseCurrency(BASE_CURRENCY);
         stubStaffLookup(APPROVER_ID, approver());
-        stubSubmitterName(SUBMITTER_ID, "Alice");
+        stubSubmitterName(SUBMITTER_ID, SUBMITTER_NAME);
         stubPublisherSuccess();
 
         notifier()
@@ -290,7 +291,7 @@ class StaffClaimNotificationNotifierTest {
     private Staff claimant() {
         Staff staff = new Staff();
         staff.setStaffId(CLAIMANT_ID);
-        staff.setName("Alice");
+        staff.setName(SUBMITTER_NAME);
         staff.setEmailCompany("claimant@example.com");
         staff.setTelMobile(APPROVER_MOBILE);
         return staff;
