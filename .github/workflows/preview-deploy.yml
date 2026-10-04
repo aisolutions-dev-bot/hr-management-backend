@@ -59,7 +59,7 @@ jobs:
           build-args: |
             GITHUB_ACTOR=BCIDev25
           secret-envs: |
-            id=github_token,env=GITHUB_TOKEN
+            github_token=GITHUB_TOKEN
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
