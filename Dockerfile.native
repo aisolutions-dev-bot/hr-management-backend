@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.10
+
 # Stage 1: Native compile with GraalVM (Mandrel)
 
 FROM quay.io/quarkus/ubi-quarkus-mandrel-builder-image:jdk-25 AS builder
@@ -7,16 +9,15 @@ USER root
 WORKDIR /app
 
 ARG GITHUB_ACTOR
-ARG GITHUB_TOKEN
 
 COPY gradlew ./gradlew
 COPY gradle/ ./gradle/
 COPY settings.gradle.kts build.gradle.kts gradle.properties ./
 COPY src/ src/
 
-RUN chmod +x ./gradlew && \
-  GITHUB_ACTOR=$GITHUB_ACTOR GITHUB_TOKEN=$GITHUB_TOKEN \
-  ./gradlew build -Dquarkus.package.type=native -x test --no-daemon
+RUN --mount=type=secret,id=github_token,env=GITHUB_TOKEN \
+  --mount=type=cache,target=/root/.gradle \
+  chmod +x ./gradlew && ./gradlew build -Dquarkus.package.type=native -x test --no-daemon
 
 # Stage 2: Minimal runtime
 

@@ -39,7 +39,9 @@ jobs:
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Build native image
-        run: docker build -f Dockerfile.native --build-arg GITHUB_ACTOR=BCIDev25 --build-arg GITHUB_TOKEN=${{ secrets.GHCR_PAT }} -t ${{ env.IMAGE }}:${{ env.IMAGE_TAG }} -t ${{ env.IMAGE }}:latest .
+        env:
+          GITHUB_TOKEN: ${{ secrets.GHCR_PAT }}
+        run: docker build -f Dockerfile.native --build-arg GITHUB_ACTOR=BCIDev25 --secret id=github_token,env=GITHUB_TOKEN -t ${{ env.IMAGE }}:${{ env.IMAGE_TAG }} -t ${{ env.IMAGE }}:latest .
 
       - name: Push
         run: |
