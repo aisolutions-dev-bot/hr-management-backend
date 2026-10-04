@@ -24,7 +24,7 @@ jobs:
           java-version: '25'
           cache: gradle
       - name: Run quality gates and tests
-        run: ./gradlew spotlessCheck checkstyleMain checkstyleTest pmdMain pmdTest test jacocoTestReport --no-daemon
+        run: GITHUB_ACTOR=BCIDev25 ./gradlew spotlessCheck checkstyleMain checkstyleTest pmdMain pmdTest test jacocoTestReport --no-daemon
 
   build:
     needs: quality
