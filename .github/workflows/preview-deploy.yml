@@ -58,7 +58,7 @@ jobs:
             ${{ env.IMAGE }}:latest
           build-args: |
             GITHUB_ACTOR=BCIDev25
-          secrets: |
+          secret-envs: |
             id=github_token,env=GITHUB_TOKEN
           cache-from: type=gha
           cache-to: type=gha,mode=max
