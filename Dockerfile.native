@@ -13,6 +13,7 @@ ARG GITHUB_ACTOR
 COPY gradlew ./gradlew
 COPY gradle/ ./gradle/
 COPY settings.gradle.kts build.gradle.kts gradle.properties ./
+COPY config/ ./config/
 COPY src/ src/
 
 RUN --mount=type=secret,id=github_token,env=GITHUB_TOKEN \

@@ -9,6 +9,7 @@ WORKDIR /app
 COPY gradlew .
 COPY gradle/ gradle/
 COPY build.gradle.kts settings.gradle.kts gradle.properties ./
+COPY config/ ./config/
 COPY src/ src/
 
 # Make Gradle wrapper executable
