@@ -82,7 +82,11 @@ jobs:
 
       - name: Deploy on VPS
         working-directory: /home/ubuntu/deploy/preview
-        run: IMAGE_TAG=${{ env.IMAGE_TAG }} docker compose -f hr-management-backend.preview.yml up -d
+        run: |
+          IMAGE_TAG=${{ env.IMAGE_TAG }} docker compose \
+            -f hr-management-backend.preview.yml \
+            -f <(printf 'services:\n  hr-management-backend:\n    environment:\n      KAFKA_BOOTSTRAP_SERVERS: ai-solutions-kafka-preview:9092\n') \
+            up -d
 
       - name: Health check
         run: |
