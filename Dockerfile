@@ -23,11 +23,9 @@ ARG GIT_BRANCH=$GIT_BRANCH
 
 # Build with environment variables for GitHub Packages
 RUN if [ "$GIT_BRANCH" = "staging" ]; then \
-  GITHUB_ACTOR=$GITHUB_ACTOR GITHUB_TOKEN=$GITHUB_TOKEN \
   ./gradlew build -Dquarkus.package.jar.type=uber-jar -Dquarkus.profile=staging \
   -DquarkusPluginId=$QUARKUS_PLUGIN_ID -DquarkusPluginVersion=$QUARKUS_PLUGIN_VERSION -x test; \
   else \
-  GITHUB_ACTOR=$GITHUB_ACTOR GITHUB_TOKEN=$GITHUB_TOKEN \
   ./gradlew build -Dquarkus.package.jar.type=uber-jar -Dquarkus.profile=prod \
   -DquarkusPluginId=$QUARKUS_PLUGIN_ID -DquarkusPluginVersion=$QUARKUS_PLUGIN_VERSION -x test; \
   fi
