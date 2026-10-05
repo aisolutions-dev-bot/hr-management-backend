@@ -49,6 +49,9 @@ dependencies {
     // Drives the shared notification outbox relay's @Scheduled poll
     implementation("io.quarkus:quarkus-scheduler")
     implementation("io.quarkus:quarkus-jackson")
+    // Structured JSON console logs (prod/staging only, see application.properties) so log
+    // fields (requestId, level, logger) are queryable in Grafana instead of grepping text.
+    implementation("io.quarkus:quarkus-logging-json")
     // Lombok
     compileOnly("org.projectlombok:lombok:1.18.42")
     annotationProcessor("org.projectlombok:lombok:1.18.42")
