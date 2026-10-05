@@ -1,9 +1,10 @@
 package com.aisolutions.hrmanagement.dto;
 
+import java.math.BigDecimal;
+
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-
-import java.math.BigDecimal;
 
 /**
  * A staff member's leave balance for one leave type in the current calendar year.
@@ -16,27 +17,28 @@ import java.math.BigDecimal;
  */
 @Data
 @NoArgsConstructor
+@RegisterForReflection
 public class LeaveBalanceDTO {
 
     private String leaveType;
     private String leaveTypeDescription;
-    private int year;                 // calendar year the balance applies to
+    private int year; // calendar year the balance applies to
 
-    private Integer serviceYears;     // completed years of service, null when no join date
+    private Integer serviceYears; // completed years of service, null when no join date
     private boolean entitlementKnown; // false = no join date → balance not verified
 
-    private BigDecimal entitledDays;  // this year's entitlement (grant if any, else matched band)
-    private BigDecimal takenDays;     // approved + pending days already booked this year
-    private BigDecimal approvedDays;  // the approved slice of takenDays (used)
-    private BigDecimal pendingDays;   // the still-pending slice of takenDays
+    private BigDecimal entitledDays; // this year's entitlement (grant if any, else matched band)
+    private BigDecimal takenDays; // approved + pending days already booked this year
+    private BigDecimal approvedDays; // the approved slice of takenDays (used)
+    private BigDecimal pendingDays; // the still-pending slice of takenDays
     private BigDecimal remainingDays; // available − pending (may be negative)
     private BigDecimal advanceTakenDays; // of takenDays, the portion taken as advanced leave (borrowed)
 
     // ── Carry-forward ──
     private BigDecimal broughtForwardDays; // still-available days carried in from prior years
-    private BigDecimal expiringDays;       // available days that expire by the end of this year
-    private java.time.LocalDate expiryDate;// soonest upcoming expiry among available days
-    private BigDecimal lapsedDays;         // days already lost to expiry / the carry cap
+    private BigDecimal expiringDays; // available days that expire by the end of this year
+    private java.time.LocalDate expiryDate; // soonest upcoming expiry among available days
+    private BigDecimal lapsedDays; // days already lost to expiry / the carry cap
 
     /** Where entitledDays came from: ASSIGNED = HR's stored entitlement, LADDER = leave-type bands. */
     private String entitlementSource;
