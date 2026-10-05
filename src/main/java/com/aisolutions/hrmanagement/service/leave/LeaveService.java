@@ -1,5 +1,20 @@
 package com.aisolutions.hrmanagement.service.leave;
 
+import java.math.BigDecimal;
+import java.time.DayOfWeek;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.NotFoundException;
+
 import com.aisolutions.hrmanagement.dto.ApprovalFlowDTO;
 import com.aisolutions.hrmanagement.dto.ApprovalTrailDTO;
 import com.aisolutions.hrmanagement.dto.DropdownOptionDTO;
@@ -16,45 +31,34 @@ import com.aisolutions.hrmanagement.repository.LeaveLedgerRepository;
 import com.aisolutions.hrmanagement.repository.LeavePolicyRepository;
 import com.aisolutions.hrmanagement.repository.LeaveTypeRepository;
 import com.aisolutions.hrmanagement.repository.NotificationRepository;
-import com.aisolutions.hrmanagement.service.leave.LeaveEntitlementCalculator.Policy;
-import com.aisolutions.hrmanagement.repository.LeavePolicyRepository.AdvancePolicy;
 import com.aisolutions.hrmanagement.repository.StaffRepository;
-import com.aisolutions.hrmanagement.service.approval.ApprovalFlowService;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
+import com.aisolutions.hrmanagement.service.approval.ApprovalFlowService;
+import com.aisolutions.hrmanagement.service.leave.LeaveEntitlementCalculator.Policy;
 import com.aisolutions.hrmanagement.service.notification.LeaveNotificationNotifier;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService.DeviceInfo;
-import com.aisolutions.shared.tenancy.CompanyPoolManager;
 import com.aisolutions.shared.notification.NotificationTransaction;
+import com.aisolutions.shared.tenancy.CompanyPoolManager;
+import com.aisolutions.shared.tenancy.DefaultTenantCompanyId;
 import com.aisolutions.shared.util.DateUtil;
-
 import io.smallrye.mutiny.Uni;
 import io.vertx.mutiny.sqlclient.Row;
 import io.vertx.mutiny.sqlclient.SqlClient;
-import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
-import jakarta.ws.rs.NotFoundException;
-
-import java.math.BigDecimal;
-import java.time.DayOfWeek;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
 
 @ApplicationScoped
 public class LeaveService {
 
-    public static final String ACTION_APPLY  = "APPLY";
+    @Inject
+    @DefaultTenantCompanyId
+    String defaultCompanyId;
+
+    public static final String ACTION_APPLY = "APPLY";
     public static final String ACTION_CANCEL = "CANCEL";
 
-    public static final String STATUS_PENDING   = "PENDING";
-    public static final String STATUS_APPROVED  = "APPROVED";
-    public static final String STATUS_REJECTED  = "REJECTED";
+    public static final String STATUS_PENDING = "PENDING";
+    public static final String STATUS_APPROVED = "APPROVED";
+    public static final String STATUS_REJECTED = "REJECTED";
     public static final String STATUS_CANCELLED = "CANCELLED";
 
     private static final String HALF_AM = "AM";
@@ -64,82 +68,140 @@ public class LeaveService {
     private static final String MODULE_ID = "mod18";
     private static final String NOTIF_TYPE_ADMIN = "Admin-Leaves";
     private static final int LEN_NOTIF_SUBJECT = 200;
-    private static final int LEN_NOTIF_DESC    = 255;
+    private static final int LEN_NOTIF_DESC = 255;
     private static final int LEN_LOG_REFERENCE = 45;
-    private static final int LEN_LOG_REMARKS   = 255;
+    private static final int LEN_LOG_REMARKS = 255;
 
-    @Inject LeaveApplicationRepository leaveRepo;
-    @Inject LeaveTypeRepository leaveTypeRepo;
-    @Inject LeavePolicyRepository leavePolicyRepo;
-    @Inject LeaveLedgerRepository ledgerRepo;
-    @Inject StaffRepository staffRepo;
-    @Inject CurrentUserService currentUserService;
-    @Inject UserActionLogService userActionLogService;
-    @Inject NotificationRepository notificationRepo;
-    @Inject CompanyPoolManager companyPoolManager;
-    @Inject LeaveNotificationNotifier leaveNotificationNotifier;
-    @Inject ApprovalFlowService approvalFlowService;
+    @Inject
+    LeaveApplicationRepository leaveRepo;
+
+    @Inject
+    LeaveTypeRepository leaveTypeRepo;
+
+    @Inject
+    LeavePolicyRepository leavePolicyRepo;
+
+    @Inject
+    LeaveLedgerRepository ledgerRepo;
+
+    @Inject
+    StaffRepository staffRepo;
+
+    @Inject
+    CurrentUserService currentUserService;
+
+    @Inject
+    UserActionLogService userActionLogService;
+
+    @Inject
+    NotificationRepository notificationRepo;
+
+    @Inject
+    CompanyPoolManager companyPoolManager;
+
+    @Inject
+    LeaveNotificationNotifier leaveNotificationNotifier;
+
+    @Inject
+    ApprovalFlowService approvalFlowService;
 
     /** Step 1 prefill: the current user's name + department (locked fields). */
     public Uni<StaffProfileDTO> getProfile(String requestedStaffId) {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-            resolveStaffId(requestedStaffId).flatMap(staffId ->
-                staffRepo.findByStaffId(pool, staffId).map(s -> {
-                    if (s == null) {
-                        return new StaffProfileDTO(staffId, staffId, null);
-                    }
-                    String name = (s.getName() != null && !s.getName().isBlank()) ? s.getName() : staffId;
-                    return new StaffProfileDTO(staffId, name, s.getDepartment());
-                })));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> resolveStaffId(requestedStaffId)
+                        .flatMap(staffId -> staffRepo
+                                .findByStaffId(pool, staffId)
+                                .map(s -> {
+                                    if (s == null) {
+                                        return new StaffProfileDTO(staffId, staffId, null);
+                                    }
+                                    String name =
+                                            (s.getName() != null && !s.getName().isBlank()) ? s.getName() : staffId;
+                                    return new StaffProfileDTO(staffId, name, s.getDepartment());
+                                })));
     }
 
     public Uni<List<DropdownOptionDTO>> getLeaveTypeOptions() {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
-            .flatMap(pool -> leaveTypeRepo.findAllOptions(pool));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> leaveTypeRepo.findAllOptions(pool));
     }
 
     public Uni<List<DropdownOptionDTO>> getApproverOptions() {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
-            .flatMap(pool -> staffRepo.findApproverOptions(pool));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> staffRepo.findApproverOptions(pool));
     }
 
     public Uni<LeaveBalanceDTO> getBalance(String requestedStaffId, String leaveType) {
         if (leaveType == null || leaveType.isBlank()) {
             return Uni.createFrom().failure(new IllegalArgumentException("leaveType is required"));
         }
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
-            .flatMap(pool -> resolveStaffId(requestedStaffId)
-                .flatMap(staffId -> staffRepo.findByStaffId(pool, staffId)
-                    .flatMap(staff -> getSingleBalance(pool, staffId, staff, leaveType))));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> resolveStaffId(requestedStaffId)
+                        .flatMap(staffId -> staffRepo
+                                .findByStaffId(pool, staffId)
+                                .flatMap(staff -> getSingleBalance(pool, staffId, staff, leaveType))));
     }
 
-    private Uni<LeaveBalanceDTO> getSingleBalance(io.vertx.mutiny.sqlclient.SqlClient pool,
-                                                   String staffId, Staff staff, String leaveType) {
-        return leaveTypeRepo.findDescription(pool, leaveType)
-            .flatMap(desc -> leaveTypeRepo.findEntitlements(pool, leaveType)
-                .flatMap(bands -> leaveTypeRepo.isEligibleOnRequest(pool, leaveType)
-                    .flatMap(onRequest -> leaveTypeRepo.findProRateMethod(pool, leaveType)
-                        .flatMap(method -> leavePolicyRepo.findPolicy(pool)
-                            .flatMap(policy -> {
-                                int year = DateUtil.nowSGT().getYear();
-                                LocalDate today = DateUtil.nowSGT().toLocalDate();
-                                LocalDate start = LocalDate.of(year, 1, 1);
-                                LocalDate end   = LocalDate.of(year, 12, 31);
-                                // Grant + used days come from the ledger (FIFO/expiry); pending is a live soft hold.
-                                return leaveRepo.sumPendingDays(pool, staffId, leaveType, start, end)
-                                    .flatMap(pending -> leaveTypeRepo.findCarryForwardCap(pool, leaveType)
-                                        .flatMap(cap -> ledgerRepo.findRows(pool, staffId, leaveType)
-                                            .onFailure().recoverWithItem(List.<LeaveLedgerRow>of())
-                                            .map(rows -> buildSingleBalance(staff, leaveType, desc, bands, year, today,
-                                                    pending, LeaveBalanceCalculator.compute(rows, cap, year, today),
-                                                    Boolean.TRUE.equals(onRequest), method, policy))));
-                            })))));
+    private Uni<LeaveBalanceDTO> getSingleBalance(
+            io.vertx.mutiny.sqlclient.SqlClient pool, String staffId, Staff staff, String leaveType) {
+        return leaveTypeRepo
+                .findDescription(pool, leaveType)
+                .flatMap(desc -> leaveTypeRepo
+                        .findEntitlements(pool, leaveType)
+                        .flatMap(bands -> leaveTypeRepo
+                                .isEligibleOnRequest(pool, leaveType)
+                                .flatMap(onRequest -> leaveTypeRepo
+                                        .findProRateMethod(pool, leaveType)
+                                        .flatMap(method -> leavePolicyRepo
+                                                .findPolicy(pool)
+                                                .flatMap(policy -> {
+                                                    int year = DateUtil.nowSGT().getYear();
+                                                    LocalDate today =
+                                                            DateUtil.nowSGT().toLocalDate();
+                                                    LocalDate start = LocalDate.of(year, 1, 1);
+                                                    LocalDate end = LocalDate.of(year, 12, 31);
+                                                    // Grant + used days come from the ledger (FIFO/expiry); pending is
+                                                    // a live soft hold.
+                                                    return leaveRepo
+                                                            .sumPendingDays(pool, staffId, leaveType, start, end)
+                                                            .flatMap(pending -> leaveTypeRepo
+                                                                    .findCarryForwardCap(pool, leaveType)
+                                                                    .flatMap(cap -> ledgerRepo
+                                                                            .findRows(pool, staffId, leaveType)
+                                                                            .onFailure()
+                                                                            .recoverWithItem(List.<LeaveLedgerRow>of())
+                                                                            .map(rows -> buildSingleBalance(
+                                                                                    staff,
+                                                                                    leaveType,
+                                                                                    desc,
+                                                                                    bands,
+                                                                                    year,
+                                                                                    today,
+                                                                                    pending,
+                                                                                    LeaveBalanceCalculator.compute(
+                                                                                            rows, cap, year, today),
+                                                                                    Boolean.TRUE.equals(onRequest),
+                                                                                    method,
+                                                                                    policy))));
+                                                })))));
     }
 
-    private LeaveBalanceDTO buildSingleBalance(Staff staff, String leaveType, String desc,
-                                                List<LeaveTypeEntitlement> bands, int year, LocalDate today,
-                                                BigDecimal pending, LeaveBalanceCalculator.Result res,
-                                                boolean onRequest, String method, Policy policy) {
+    private LeaveBalanceDTO buildSingleBalance(
+            Staff staff,
+            String leaveType,
+            String desc,
+            List<LeaveTypeEntitlement> bands,
+            int year,
+            LocalDate today,
+            BigDecimal pending,
+            LeaveBalanceCalculator.Result res,
+            boolean onRequest,
+            String method,
+            Policy policy) {
         LeaveBalanceDTO dto = new LeaveBalanceDTO();
         dto.setLeaveType(leaveType);
         dto.setLeaveTypeDescription(desc);
@@ -186,49 +248,83 @@ public class LeaveService {
         if (bands.isEmpty()) {
             dto.setMessage("No entitlement bands configured for this leave type.");
         } else if (entitled.signum() == 0) {
-            dto.setMessage(sug.note() != null ? sug.note()
-                    : "Below the first entitlement band — no annual entitlement yet.");
+            dto.setMessage(
+                    sug.note() != null ? sug.note() : "Below the first entitlement band — no annual entitlement yet.");
         }
         return dto;
     }
 
     public Uni<List<LeaveBalanceDTO>> getBalances(String requestedStaffId) {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
-            .flatMap(pool -> resolveStaffId(requestedStaffId)
-                .flatMap(staffId -> staffRepo.findByStaffId(pool, staffId)
-                    .flatMap(staff -> computeAllBalances(pool, staffId, staff))));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> resolveStaffId(requestedStaffId)
+                        .flatMap(staffId -> staffRepo
+                                .findByStaffId(pool, staffId)
+                                .flatMap(staff -> computeAllBalances(pool, staffId, staff))));
     }
 
-    private Uni<List<LeaveBalanceDTO>> computeAllBalances(io.vertx.mutiny.sqlclient.SqlClient pool,
-                                                           String staffId, Staff staff) {
-        return leaveTypeRepo.findAllOptions(pool)
-            .flatMap(types -> leaveTypeRepo.findAllEntitlements(pool)
-                .flatMap(allBands -> leaveTypeRepo.findEligibleOnRequestCodes(pool)
-                    .flatMap(onRequestCodes -> leaveTypeRepo.findCarryForwardCaps(pool)
-                        .flatMap(caps -> leaveTypeRepo.findProRateMethods(pool)
-                            .flatMap(methods -> leavePolicyRepo.findPolicy(pool)
-                                .flatMap(policy -> {
-                                    int year = DateUtil.nowSGT().getYear();
-                                    LocalDate today = DateUtil.nowSGT().toLocalDate();
-                                    LocalDate start = LocalDate.of(year, 1, 1);
-                                    LocalDate end   = LocalDate.of(year, 12, 31);
-                                    // Pending (live soft hold) from the applications; grant + used from the ledger.
-                                    return leaveRepo.sumBookedDaysByTypeAndStatus(pool, staffId, start, end)
-                                        .flatMap(prows -> ledgerRepo.findRowsByStaff(pool, staffId)
-                                            .onFailure().recoverWithItem(List.<LeaveLedgerRow>of())
-                                            .map(ledgerRows -> aggregateBalances(staff, types, allBands, year, today,
-                                                    prows, ledgerRows, caps, onRequestCodes, methods, policy)));
-                                }))))));
+    private Uni<List<LeaveBalanceDTO>> computeAllBalances(
+            io.vertx.mutiny.sqlclient.SqlClient pool, String staffId, Staff staff) {
+        return leaveTypeRepo
+                .findAllOptions(pool)
+                .flatMap(types -> leaveTypeRepo
+                        .findAllEntitlements(pool)
+                        .flatMap(allBands -> leaveTypeRepo
+                                .findEligibleOnRequestCodes(pool)
+                                .flatMap(onRequestCodes -> leaveTypeRepo
+                                        .findCarryForwardCaps(pool)
+                                        .flatMap(caps -> leaveTypeRepo
+                                                .findProRateMethods(pool)
+                                                .flatMap(methods -> leavePolicyRepo
+                                                        .findPolicy(pool)
+                                                        .flatMap(policy -> {
+                                                            int year = DateUtil.nowSGT()
+                                                                    .getYear();
+                                                            LocalDate today = DateUtil.nowSGT()
+                                                                    .toLocalDate();
+                                                            LocalDate start = LocalDate.of(year, 1, 1);
+                                                            LocalDate end = LocalDate.of(year, 12, 31);
+                                                            // Pending (live soft hold) from the applications; grant +
+                                                            // used from the ledger.
+                                                            return leaveRepo
+                                                                    .sumBookedDaysByTypeAndStatus(
+                                                                            pool, staffId, start, end)
+                                                                    .flatMap(prows -> ledgerRepo
+                                                                            .findRowsByStaff(pool, staffId)
+                                                                            .onFailure()
+                                                                            .recoverWithItem(List.<LeaveLedgerRow>of())
+                                                                            .map(ledgerRows -> aggregateBalances(
+                                                                                    staff,
+                                                                                    types,
+                                                                                    allBands,
+                                                                                    year,
+                                                                                    today,
+                                                                                    prows,
+                                                                                    ledgerRows,
+                                                                                    caps,
+                                                                                    onRequestCodes,
+                                                                                    methods,
+                                                                                    policy)));
+                                                        }))))));
     }
 
-    private List<LeaveBalanceDTO> aggregateBalances(Staff staff, List<DropdownOptionDTO> types,
-                                                     List<LeaveTypeEntitlement> allBands, int year, LocalDate today,
-                                                     List<Row> prows, List<LeaveLedgerRow> ledgerRows,
-                                                     Map<String, Integer> caps, Set<String> onRequestCodes,
-                                                     Map<String, String> methods, Policy policy) {
+    private List<LeaveBalanceDTO> aggregateBalances(
+            Staff staff,
+            List<DropdownOptionDTO> types,
+            List<LeaveTypeEntitlement> allBands,
+            int year,
+            LocalDate today,
+            List<Row> prows,
+            List<LeaveLedgerRow> ledgerRows,
+            Map<String, Integer> caps,
+            Set<String> onRequestCodes,
+            Map<String, String> methods,
+            Policy policy) {
         Map<String, List<LeaveTypeEntitlement>> bandsByType = new LinkedHashMap<>();
         for (LeaveTypeEntitlement b : allBands) {
-            bandsByType.computeIfAbsent(b.getLeaveType(), k -> new ArrayList<>()).add(b);
+            bandsByType
+                    .computeIfAbsent(b.getLeaveType(), k -> new ArrayList<>())
+                    .add(b);
         }
         Map<String, BigDecimal> pendingByType = new HashMap<>();
         for (Row r : prows) {
@@ -252,17 +348,32 @@ public class LeaveService {
             // Without a GRANT bucket: an on-request type never auto-shows (regardless of any ladder
             // bands left on it), and a type with no ladder band has nothing to show.
             if (!res.hasGrant() && (onRequestCodes.contains(code) || !hasBands)) continue;
-            out.add(buildBalance(code, type.getLabel(), hasBands ? bands : List.of(), joinDate, year, today,
-                    res, pendingByType.getOrDefault(code, BigDecimal.ZERO),
-                    methods.getOrDefault(code, LeaveEntitlementCalculator.METHOD_NONE), policy));
+            out.add(buildBalance(
+                    code,
+                    type.getLabel(),
+                    hasBands ? bands : List.of(),
+                    joinDate,
+                    year,
+                    today,
+                    res,
+                    pendingByType.getOrDefault(code, BigDecimal.ZERO),
+                    methods.getOrDefault(code, LeaveEntitlementCalculator.METHOD_NONE),
+                    policy));
         }
         return out;
     }
 
-    private static LeaveBalanceDTO buildBalance(String leaveType, String description,
-                                                List<LeaveTypeEntitlement> bands, LocalDate joinDate,
-                                                int year, LocalDate today, LeaveBalanceCalculator.Result res,
-                                                BigDecimal pending, String method, Policy policy) {
+    private static LeaveBalanceDTO buildBalance(
+            String leaveType,
+            String description,
+            List<LeaveTypeEntitlement> bands,
+            LocalDate joinDate,
+            int year,
+            LocalDate today,
+            LeaveBalanceCalculator.Result res,
+            BigDecimal pending,
+            String method,
+            Policy policy) {
         LeaveBalanceDTO dto = new LeaveBalanceDTO();
         dto.setLeaveType(leaveType);
         dto.setLeaveTypeDescription(description);
@@ -297,8 +408,8 @@ public class LeaveService {
         dto.setEntitledDays(entitled);
         dto.setRemainingDays(entitled.subtract(taken));
         if (entitled.signum() == 0) {
-            dto.setMessage(sug.note() != null ? sug.note()
-                    : "Below the first entitlement band — no annual entitlement yet.");
+            dto.setMessage(
+                    sug.note() != null ? sug.note() : "Below the first entitlement band — no annual entitlement yet.");
         }
         return dto;
     }
@@ -310,7 +421,7 @@ public class LeaveService {
      */
     private static void applyLedgerBalance(LeaveBalanceDTO dto, LeaveBalanceCalculator.Result res, BigDecimal pending) {
         dto.setEntitlementKnown(true);
-        dto.setServiceYears(res.serviceYears());   // snapshot from the year's grant; may be null
+        dto.setServiceYears(res.serviceYears()); // snapshot from the year's grant; may be null
         dto.setEntitledDays(nz(res.entitled()));
         dto.setBroughtForwardDays(nz(res.broughtForward()));
         dto.setRemainingDays(nz(res.available()).subtract(pending));
@@ -329,50 +440,63 @@ public class LeaveService {
         if (leaveType == null || leaveType.isBlank()) {
             return Uni.createFrom().failure(new IllegalArgumentException("leaveType is required"));
         }
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-            resolveStaffId(requestedStaffId).flatMap(staffId ->
-                leaveRepo.findCancelable(pool, staffId, leaveType)
-                    .map(list -> list.stream().map(this::toDtoBasic).toList())));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> resolveStaffId(requestedStaffId)
+                        .flatMap(staffId -> leaveRepo
+                                .findCancelable(pool, staffId, leaveType)
+                                .map(list -> list.stream().map(this::toDtoBasic).toList())));
     }
 
     public Uni<List<LeaveApplicationDTO>> listByStaff(String staffId) {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-            leaveRepo.findByStaff(pool, staffId)
-                .map(list -> list.stream().map(this::toDtoBasic).toList()));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> leaveRepo
+                        .findByStaff(pool, staffId)
+                        .map(list -> list.stream().map(this::toDtoBasic).toList()));
     }
 
     public Uni<LeaveApplicationDTO> getOne(Long id) {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-            leaveRepo.findById(pool, id).flatMap(e -> {
-                if (e == null) return Uni.createFrom().nullItem();
-                LeaveApplicationDTO dto = toDtoBasic(e);
-                return leaveTypeRepo.findDescription(pool, e.getLeaveType())
-                    .onFailure().recoverWithItem((String) null)
-                    .flatMap(desc -> {
-                        dto.setLeaveTypeDescription(desc);
-                        return staffRepo.findNameByStaffId(pool, e.getApproverStaffId())
-                            .onFailure().recoverWithItem((String) null)
-                            .flatMap(approverName -> {
-                                dto.setApproverName(approverName);
-                                // Resolve the decider's name too (approvedBy holds their staff id).
-                                if (e.getApprovedBy() == null || e.getApprovedBy().isBlank()) {
-                                    return Uni.createFrom().item(dto);
-                                }
-                                return staffRepo.findNameByStaffId(pool, e.getApprovedBy())
-                                    .onFailure().recoverWithItem((String) null)
-                                    .map(decidedByName -> {
-                                        dto.setApprovedByName(decidedByName);
-                                        return dto;
-                                    });
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> leaveRepo.findById(pool, id).flatMap(e -> {
+                    if (e == null) return Uni.createFrom().nullItem();
+                    LeaveApplicationDTO dto = toDtoBasic(e);
+                    return leaveTypeRepo
+                            .findDescription(pool, e.getLeaveType())
+                            .onFailure()
+                            .recoverWithItem((String) null)
+                            .flatMap(desc -> {
+                                dto.setLeaveTypeDescription(desc);
+                                return staffRepo
+                                        .findNameByStaffId(pool, e.getApproverStaffId())
+                                        .onFailure()
+                                        .recoverWithItem((String) null)
+                                        .flatMap(approverName -> {
+                                            dto.setApproverName(approverName);
+                                            // Resolve the decider's name too (approvedBy holds their staff id).
+                                            if (e.getApprovedBy() == null
+                                                    || e.getApprovedBy().isBlank()) {
+                                                return Uni.createFrom().item(dto);
+                                            }
+                                            return staffRepo
+                                                    .findNameByStaffId(pool, e.getApprovedBy())
+                                                    .onFailure()
+                                                    .recoverWithItem((String) null)
+                                                    .map(decidedByName -> {
+                                                        dto.setApprovedByName(decidedByName);
+                                                        return dto;
+                                                    });
+                                        });
                             });
-                    });
-            }));
+                }));
     }
 
     /** Whether an approval flow governs leave — the apply form hides the approver step when true. */
     public Uni<Boolean> isApprovalFlowActive() {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
-            .flatMap(pool -> approvalFlowService.isFlowActive(pool));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> approvalFlowService.isFlowActive(pool));
     }
 
     /**
@@ -380,28 +504,34 @@ public class LeaveService {
      * tiers + approvers (the applicant does not choose one); otherwise inactive.
      */
     public Uni<ApprovalFlowDTO> getApprovalFlow() {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
-            .flatMap(pool -> applicantDepartment(pool)
-                .flatMap(applicantDept -> approvalFlowService.flowChain(pool, applicantDept)))
-            .map(chain -> {
-                // Tiers arrive already resolved: a DEPARTMENT tier is either the concrete dept
-                // in-charge (shown like any staff approver) or skipped, so each tier here names a
-                // real person.
-                List<ApprovalFlowDTO.Tier> tiers = chain.tiers().stream()
-                    .map(t -> new ApprovalFlowDTO.Tier(t.level(), t.staffId(),
-                            (t.staffName() != null && !t.staffName().isBlank()) ? t.staffName() : t.staffId(),
-                            t.dept()))
-                    .toList();
-                return new ApprovalFlowDTO(chain.active(), chain.mode(), tiers);
-            });
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> applicantDepartment(pool)
+                        .flatMap(applicantDept -> approvalFlowService.flowChain(pool, applicantDept)))
+                .map(chain -> {
+                    // Tiers arrive already resolved: a DEPARTMENT tier is either the concrete dept
+                    // in-charge (shown like any staff approver) or skipped, so each tier here names a
+                    // real person.
+                    List<ApprovalFlowDTO.Tier> tiers = chain.tiers().stream()
+                            .map(t -> new ApprovalFlowDTO.Tier(
+                                    t.level(),
+                                    t.staffId(),
+                                    (t.staffName() != null && !t.staffName().isBlank()) ? t.staffName() : t.staffId(),
+                                    t.dept()))
+                            .toList();
+                    return new ApprovalFlowDTO(chain.active(), chain.mode(), tiers);
+                });
     }
 
     /** The current applicant's department (for resolving DEPARTMENT tiers on the apply form),
      *  or null when it cannot be determined — the flow then shows a role label for such tiers. */
     private Uni<String> applicantDepartment(io.vertx.mutiny.sqlclient.SqlClient pool) {
         return currentUserService.getCurrentUser().flatMap(user -> {
-            String staffId = (user != null && user.getStaffId() != null
-                    && !CurrentUserService.SYSTEM_USER.equals(user.getStaffId())) ? user.getStaffId() : null;
+            String staffId = (user != null
+                            && user.getStaffId() != null
+                            && !CurrentUserService.SYSTEM_USER.equals(user.getStaffId()))
+                    ? user.getStaffId()
+                    : null;
             if (staffId == null) {
                 return Uni.createFrom().nullItem();
             }
@@ -411,16 +541,19 @@ public class LeaveService {
 
     /** The approval trail for a leave, read from the m07ApprovalAction log (or the leave's own fields for legacy records). */
     public Uni<ApprovalTrailDTO> getApprovalTrail(Long id) {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-            leaveRepo.findById(pool, id).flatMap(e ->
-                e == null ? Uni.createFrom().nullItem() : approvalFlowService.buildTrail(pool, e)));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> leaveRepo
+                        .findById(pool, id)
+                        .flatMap(e ->
+                                e == null ? Uni.createFrom().nullItem() : approvalFlowService.buildTrail(pool, e)));
     }
 
     public Uni<LeaveApplicationDTO> submitApplication(LeaveApplicationDTO dto, DeviceInfo deviceInfo) {
         String action = normalizeAction(dto.getLeaveAction());
         if (action == null) {
-            return Uni.createFrom().failure(
-                    new IllegalArgumentException("I wish to (leaveAction) must be APPLY or CANCEL"));
+            return Uni.createFrom()
+                    .failure(new IllegalArgumentException("I wish to (leaveAction) must be APPLY or CANCEL"));
         }
         if (dto.getLeaveType() == null || dto.getLeaveType().isBlank()) {
             return Uni.createFrom().failure(new IllegalArgumentException("Leave Type is required"));
@@ -429,33 +562,49 @@ public class LeaveService {
         // Load the applicant first: the flow decision is department-aware (a DEPARTMENT tier
         // resolves to that department's in-charge), so the applicant's department is needed
         // before we know whether a usable flow governs this leave.
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
-            .flatMap(pool -> resolveStaffId(dto.getStaffId())
-                .flatMap(staffId -> staffRepo.findByStaffId(pool, staffId).flatMap(staff -> {
-                    String applicantDept = staff != null ? staff.getDepartment() : null;
-                    return approvalFlowService.resolvedInitialApprovers(pool, applicantDept).flatMap(flowApprovers -> {
-                        // A usable flow (its tiers resolve to real approvers) decides the approver, so the
-                        // applicant need not pick one. Only when no flow is usable — none configured, or every
-                        // tier skipped because a department has no in-charge — must the applicant choose one.
-                        boolean flowActive = flowApprovers != null && !flowApprovers.isEmpty();
-                        String chosen = dto.getApproverStaffId();
-                        if (chosen == null || chosen.isBlank()) {
-                            if (flowActive) {
-                                dto.setApproverStaffId(flowApprovers.get(0));
-                            } else {
-                                return Uni.createFrom().<LeaveApplicationDTO>failure(
-                                        new IllegalArgumentException("An approver must be selected"));
-                            }
-                        }
-                        return buildAndValidate(action, dto, staffId, staff, pool)
-                            .flatMap(entity -> ACTION_APPLY.equals(entity.getLeaveAction())
-                                    ? validateApplyEligibility(pool, staff, entity.getLeaveType())
-                                        .flatMap(v -> applyOverflowSplit(pool, staffId, staff, entity,
-                                                dto.isOverflowConfirmed()))
-                                    : Uni.createFrom().item(entity))
-                            .flatMap(entity -> saveAndNotify(pool, entity, deviceInfo));
-                    });
-                })));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> resolveStaffId(dto.getStaffId())
+                        .flatMap(staffId -> staffRepo
+                                .findByStaffId(pool, staffId)
+                                .flatMap(staff -> {
+                                    String applicantDept = staff != null ? staff.getDepartment() : null;
+                                    return approvalFlowService
+                                            .resolvedInitialApprovers(pool, applicantDept)
+                                            .flatMap(flowApprovers -> {
+                                                // A usable flow (its tiers resolve to real approvers) decides the
+                                                // approver, so the
+                                                // applicant need not pick one. Only when no flow is usable — none
+                                                // configured, or every
+                                                // tier skipped because a department has no in-charge — must the
+                                                // applicant choose one.
+                                                boolean flowActive = flowApprovers != null && !flowApprovers.isEmpty();
+                                                String chosen = dto.getApproverStaffId();
+                                                if (chosen == null || chosen.isBlank()) {
+                                                    if (flowActive) {
+                                                        dto.setApproverStaffId(flowApprovers.get(0));
+                                                    } else {
+                                                        return Uni.createFrom()
+                                                                .<LeaveApplicationDTO>failure(
+                                                                        new IllegalArgumentException(
+                                                                                "An approver must be selected"));
+                                                    }
+                                                }
+                                                return buildAndValidate(action, dto, staffId, staff, pool)
+                                                        .flatMap(entity -> ACTION_APPLY.equals(entity.getLeaveAction())
+                                                                ? validateApplyEligibility(
+                                                                                pool, staff, entity.getLeaveType())
+                                                                        .flatMap(v -> applyOverflowSplit(
+                                                                                pool,
+                                                                                staffId,
+                                                                                staff,
+                                                                                entity,
+                                                                                dto.isOverflowConfirmed()))
+                                                                : Uni.createFrom()
+                                                                        .item(entity))
+                                                        .flatMap(entity -> saveAndNotify(pool, entity, deviceInfo));
+                                            });
+                                })));
     }
 
     /**
@@ -464,34 +613,39 @@ public class LeaveService {
      * {@link LeaveNotificationNotifier}, persistence to {@link #saveLeaveWithSnapshot} and the
      * per-approver bell to {@link #notifyApprovers}.
      */
-    private Uni<LeaveApplicationDTO> saveAndNotify(io.vertx.mutiny.sqlclient.Pool pool,
-                                                    LeaveApplication entity, DeviceInfo deviceInfo) {
+    private Uni<LeaveApplicationDTO> saveAndNotify(
+            io.vertx.mutiny.sqlclient.Pool pool, LeaveApplication entity, DeviceInfo deviceInfo) {
         String companyId = currentUserService.getCurrentCompanyId();
         return pool.withTransaction(tx -> saveLeaveWithSnapshot(tx, entity)
-                .flatMap(saved -> resolveSubmitRecipients(tx, saved)
-                        .flatMap(recipients -> stageLeaveSubmittedNotifications(tx, saved, recipients, companyId)
-                                .replaceWith(new SubmittedLeave(saved, recipients)))))
-            .flatMap(submitted -> logSubmit(submitted.leave(), deviceInfo)
-                    .flatMap(ignored -> notifyApprovers(submitted.leave(), submitted.recipients()))
-                    .replaceWith(submitted.leave()))
-            .flatMap(saved -> getOne(saved.getUniqId()));
+                        .flatMap(saved -> resolveSubmitRecipients(tx, saved)
+                                .flatMap(
+                                        recipients -> stageLeaveSubmittedNotifications(tx, saved, recipients, companyId)
+                                                .replaceWith(new SubmittedLeave(saved, recipients)))))
+                .flatMap(submitted -> logSubmit(submitted.leave(), deviceInfo)
+                        .flatMap(ignored -> notifyApprovers(submitted.leave(), submitted.recipients()))
+                        .replaceWith(submitted.leave()))
+                .flatMap(saved -> getOne(saved.getUniqId()));
     }
 
     /** Saves the leave and freezes the resolved approval flow onto it in the same transaction. */
     private Uni<LeaveApplication> saveLeaveWithSnapshot(SqlClient tx, LeaveApplication entity) {
-        return leaveRepo.save(tx, entity)
-            .flatMap(saved -> approvalFlowService.snapshotAtSubmit(tx, saved.getUniqId(),
-                        saved.getDepartment(),
-                        saved.getEntryStaff() != null ? saved.getEntryStaff() : saved.getStaffId(),
-                        DateUtil.nowSGT())
-                    .replaceWith(saved));
+        return leaveRepo
+                .save(tx, entity)
+                .flatMap(saved -> approvalFlowService
+                        .snapshotAtSubmit(
+                                tx,
+                                saved.getUniqId(),
+                                saved.getDepartment(),
+                                saved.getEntryStaff() != null ? saved.getEntryStaff() : saved.getStaffId(),
+                                DateUtil.nowSGT())
+                        .replaceWith(saved));
     }
 
     /** Delegates leave envelope construction and staging to {@link LeaveNotificationNotifier}. */
-    private Uni<Void> stageLeaveSubmittedNotifications(SqlClient tx, LeaveApplication saved,
-                                                       List<String> recipients, String companyId) {
+    private Uni<Void> stageLeaveSubmittedNotifications(
+            SqlClient tx, LeaveApplication saved, List<String> recipients, String companyId) {
         return leaveNotificationNotifier.notifyLeaveSubmitted(
-                new NotificationTransaction(tx, companyId), saved, recipients);
+                new NotificationTransaction(tx, resolveNotificationCompanyId(companyId)), saved, recipients);
     }
 
     /**
@@ -499,22 +653,27 @@ public class LeaveService {
      * flow is active for mod18 + LeaveApplication, otherwise the applicant-chosen
      * approver (fallback — today's behaviour when no flow is configured).
      */
-    private Uni<List<String>> resolveSubmitRecipients(io.vertx.mutiny.sqlclient.SqlClient pool,
-                                                       LeaveApplication saved) {
+    private Uni<List<String>> resolveSubmitRecipients(
+            io.vertx.mutiny.sqlclient.SqlClient pool, LeaveApplication saved) {
         // Read from the just-frozen snapshot (not live config) so DEPARTMENT tiers resolved
         // at submit are honoured and the notification matches the flow that will actually run.
-        return approvalFlowService.pendingApproversFromSnapshot(pool, saved.getUniqId()).map(flowApprovers -> {
-            if (flowApprovers != null && !flowApprovers.isEmpty()) {
-                return flowApprovers;
-            }
-            String chosen = saved.getApproverStaffId();
-            return (chosen == null || chosen.isBlank()) ? List.<String>of() : List.of(chosen);
-        });
+        return approvalFlowService
+                .pendingApproversFromSnapshot(pool, saved.getUniqId())
+                .map(flowApprovers -> {
+                    if (flowApprovers != null && !flowApprovers.isEmpty()) {
+                        return flowApprovers;
+                    }
+                    String chosen = saved.getApproverStaffId();
+                    return (chosen == null || chosen.isBlank()) ? List.<String>of() : List.of(chosen);
+                });
     }
 
-    private Uni<LeaveApplication> buildAndValidate(String action, LeaveApplicationDTO dto,
-                                                   String staffId, Staff staff,
-                                                   io.vertx.mutiny.sqlclient.SqlClient pool) {
+    private Uni<LeaveApplication> buildAndValidate(
+            String action,
+            LeaveApplicationDTO dto,
+            String staffId,
+            Staff staff,
+            io.vertx.mutiny.sqlclient.SqlClient pool) {
         LocalDateTime now = DateUtil.nowSGT();
         LeaveApplication e = new LeaveApplication();
         e.setStaffId(staffId);
@@ -535,40 +694,36 @@ public class LeaveService {
             LocalDate from = dto.getFromDate();
             LocalDate to = dto.getToDate();
             if (from == null || to == null) {
-                return Uni.createFrom().failure(
-                        new IllegalArgumentException("From and To dates are required to apply for leave"));
+                return Uni.createFrom()
+                        .failure(new IllegalArgumentException("From and To dates are required to apply for leave"));
             }
             if (to.isBefore(from)) {
-                return Uni.createFrom().failure(
-                        new IllegalArgumentException("To date cannot be before From date"));
+                return Uni.createFrom().failure(new IllegalArgumentException("To date cannot be before From date"));
             }
             String half = normalizeHalf(dto.getHalfDayPeriod());
             e.setFromDate(from);
             e.setToDate(to);
             e.setHalfDayPeriod(half);
-            BigDecimal total = dto.getTotalDays() != null
-                    ? dto.getTotalDays()
-                    : workingDays(from, to, half);
+            BigDecimal total = dto.getTotalDays() != null ? dto.getTotalDays() : workingDays(from, to, half);
             e.setTotalDays(total);
             return Uni.createFrom().item(e);
         }
 
         Long refId = dto.getCancelRefId();
         if (refId == null) {
-            return Uni.createFrom().failure(
-                    new IllegalArgumentException("Select the leave to cancel"));
+            return Uni.createFrom().failure(new IllegalArgumentException("Select the leave to cancel"));
         }
         return leaveRepo.findById(pool, refId).flatMap(ref -> {
             if (ref == null) {
                 return Uni.createFrom().failure(new NotFoundException("Leave " + refId + " not found"));
             }
             if (!staffId.equalsIgnoreCase(ref.getStaffId())) {
-                return Uni.createFrom().failure(
-                        new IllegalArgumentException("You can only cancel your own leave"));
+                return Uni.createFrom().failure(new IllegalArgumentException("You can only cancel your own leave"));
             }
             if (!STATUS_APPROVED.equalsIgnoreCase(ref.getStatus())) {
-                return Uni.createFrom().failure(new IllegalArgumentException(
-                        "Only an approved leave can be cancelled (current status: " + ref.getStatus() + ")"));
+                return Uni.createFrom()
+                        .failure(new IllegalArgumentException(
+                                "Only an approved leave can be cancelled (current status: " + ref.getStatus() + ")"));
             }
             e.setCancelRefId(refId);
             e.setLeaveType(ref.getLeaveType());
@@ -587,22 +742,25 @@ public class LeaveService {
      * manager decide, and the advanced/unpaid-leave overflow feature will route any excess.
      * Cancellations are never gated.
      */
-    private Uni<Void> validateApplyEligibility(io.vertx.mutiny.sqlclient.SqlClient pool,
-                                               Staff staff, String leaveType) {
-        return leaveTypeRepo.findProRateMethod(pool, leaveType).flatMap(method ->
-            leavePolicyRepo.findPolicy(pool).flatMap(policy -> {
-                LocalDate join = joinDate(staff);
-                if (!LeaveEntitlementCalculator.METHOD_NONE.equals(method) && join != null) {
-                    int months = LeaveEntitlementCalculator.completedMonths(join, DateUtil.nowSGT().toLocalDate());
-                    if (months < policy.eligibilityMonths()) {
-                        return Uni.createFrom().<Void>failure(new IllegalArgumentException(
-                                "Not yet eligible for " + leaveType + " leave — a minimum of "
-                                + policy.eligibilityMonths() + " months of service is required (currently "
-                                + months + ")."));
+    private Uni<Void> validateApplyEligibility(
+            io.vertx.mutiny.sqlclient.SqlClient pool, Staff staff, String leaveType) {
+        return leaveTypeRepo
+                .findProRateMethod(pool, leaveType)
+                .flatMap(method -> leavePolicyRepo.findPolicy(pool).flatMap(policy -> {
+                    LocalDate join = joinDate(staff);
+                    if (!LeaveEntitlementCalculator.METHOD_NONE.equals(method) && join != null) {
+                        int months = LeaveEntitlementCalculator.completedMonths(
+                                join, DateUtil.nowSGT().toLocalDate());
+                        if (months < policy.eligibilityMonths()) {
+                            return Uni.createFrom()
+                                    .<Void>failure(new IllegalArgumentException("Not yet eligible for " + leaveType
+                                            + " leave — a minimum of "
+                                            + policy.eligibilityMonths() + " months of service is required (currently "
+                                            + months + ")."));
+                        }
                     }
-                }
-                return Uni.createFrom().voidItem();
-            }));
+                    return Uni.createFrom().voidItem();
+                }));
     }
 
     // ─────────────────────────────────────────────────────────
@@ -610,9 +768,15 @@ public class LeaveService {
     // ─────────────────────────────────────────────────────────
 
     /** What the overflow split resolved to, plus the inputs used, for the preview / enforcement. */
-    private record OverflowResult(LeaveOverflowCalculator.Split split, BigDecimal remaining,
-                                  boolean allowAdvance, BigDecimal advanceMaxDays, boolean entitlementKnown) {
-        boolean hasOverflow() { return split.hasOverflow(); }
+    private record OverflowResult(
+            LeaveOverflowCalculator.Split split,
+            BigDecimal remaining,
+            boolean allowAdvance,
+            BigDecimal advanceMaxDays,
+            boolean entitlementKnown) {
+        boolean hasOverflow() {
+            return split.hasOverflow();
+        }
     }
 
     /**
@@ -621,43 +785,51 @@ public class LeaveService {
      * that the staff has not confirmed is rejected so unpaid/advanced leave is never created
      * silently.
      */
-    private Uni<LeaveApplication> applyOverflowSplit(io.vertx.mutiny.sqlclient.SqlClient pool, String staffId,
-                                                     Staff staff, LeaveApplication entity, boolean confirmed) {
+    private Uni<LeaveApplication> applyOverflowSplit(
+            io.vertx.mutiny.sqlclient.SqlClient pool,
+            String staffId,
+            Staff staff,
+            LeaveApplication entity,
+            boolean confirmed) {
         BigDecimal total = entity.getTotalDays();
         if (total == null || total.signum() <= 0) {
             return Uni.createFrom().item(entity);
         }
-        return computeOverflow(pool, staffId, staff, entity.getLeaveType(), total).map(ov -> {
-            if (!ov.hasOverflow()) {
-                return entity;   // covered by the paid balance — no split stored
-            }
-            if (!confirmed) {
-                throw new IllegalArgumentException(overflowMessage(entity.getLeaveType(), ov)
-                        + " Please confirm to proceed.");
-            }
-            entity.setPaidDays(ov.split().paid());
-            entity.setAdvanceDays(ov.split().advance());
-            entity.setUnpaidDays(ov.split().unpaid());
-            return entity;
-        });
+        return computeOverflow(pool, staffId, staff, entity.getLeaveType(), total)
+                .map(ov -> {
+                    if (!ov.hasOverflow()) {
+                        return entity; // covered by the paid balance — no split stored
+                    }
+                    if (!confirmed) {
+                        throw new IllegalArgumentException(
+                                overflowMessage(entity.getLeaveType(), ov) + " Please confirm to proceed.");
+                    }
+                    entity.setPaidDays(ov.split().paid());
+                    entity.setAdvanceDays(ov.split().advance());
+                    entity.setUnpaidDays(ov.split().unpaid());
+                    return entity;
+                });
     }
 
     /** Resolves the funding split for a leave type + day count against the current balance + policy. */
-    private Uni<OverflowResult> computeOverflow(io.vertx.mutiny.sqlclient.SqlClient pool, String staffId,
-                                                Staff staff, String leaveType, BigDecimal total) {
-        return getSingleBalance(pool, staffId, staff, leaveType).flatMap(bal ->
-            leavePolicyRepo.findAdvancePolicy(pool).map(adv -> {
-                // No known paid entitlement (on-request / no join date) → no overflow concept.
-                if (!bal.isEntitlementKnown() || bal.getRemainingDays() == null) {
-                    return new OverflowResult(new LeaveOverflowCalculator.Split(
-                            total, BigDecimal.ZERO, BigDecimal.ZERO, false),
-                            null, adv.allowAdvance(), adv.maxDays(), false);
-                }
-                BigDecimal remaining = bal.getRemainingDays();
-                LeaveOverflowCalculator.Split split =
-                        LeaveOverflowCalculator.compute(total, remaining, adv.allowAdvance(), adv.maxDays());
-                return new OverflowResult(split, remaining, adv.allowAdvance(), adv.maxDays(), true);
-            }));
+    private Uni<OverflowResult> computeOverflow(
+            io.vertx.mutiny.sqlclient.SqlClient pool, String staffId, Staff staff, String leaveType, BigDecimal total) {
+        return getSingleBalance(pool, staffId, staff, leaveType)
+                .flatMap(bal -> leavePolicyRepo.findAdvancePolicy(pool).map(adv -> {
+                    // No known paid entitlement (on-request / no join date) → no overflow concept.
+                    if (!bal.isEntitlementKnown() || bal.getRemainingDays() == null) {
+                        return new OverflowResult(
+                                new LeaveOverflowCalculator.Split(total, BigDecimal.ZERO, BigDecimal.ZERO, false),
+                                null,
+                                adv.allowAdvance(),
+                                adv.maxDays(),
+                                false);
+                    }
+                    BigDecimal remaining = bal.getRemainingDays();
+                    LeaveOverflowCalculator.Split split =
+                            LeaveOverflowCalculator.compute(total, remaining, adv.allowAdvance(), adv.maxDays());
+                    return new OverflowResult(split, remaining, adv.allowAdvance(), adv.maxDays(), true);
+                }));
     }
 
     /** Apply-form preview: how the requested days would be funded (paid / advanced / unpaid). */
@@ -668,11 +840,13 @@ public class LeaveService {
         if (total == null || total.signum() <= 0) {
             return Uni.createFrom().failure(new IllegalArgumentException("days must be greater than zero"));
         }
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
-            .flatMap(pool -> resolveStaffId(requestedStaffId)
-                .flatMap(staffId -> staffRepo.findByStaffId(pool, staffId)
-                    .flatMap(staff -> computeOverflow(pool, staffId, staff, leaveType, total)
-                        .map(ov -> toPreview(leaveType, total, ov)))));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> resolveStaffId(requestedStaffId)
+                        .flatMap(staffId -> staffRepo
+                                .findByStaffId(pool, staffId)
+                                .flatMap(staff -> computeOverflow(pool, staffId, staff, leaveType, total)
+                                        .map(ov -> toPreview(leaveType, total, ov)))));
     }
 
     private LeaveOverflowPreviewDTO toPreview(String leaveType, BigDecimal total, OverflowResult ov) {
@@ -695,11 +869,15 @@ public class LeaveService {
     private static String overflowMessage(String leaveType, OverflowResult ov) {
         LeaveOverflowCalculator.Split s = ov.split();
         String type = nz(leaveType);
-        StringBuilder sb = new StringBuilder("This exceeds your ").append(type)
-                .append(" balance: ").append(plain(s.paid())).append(" day(s) paid");
+        StringBuilder sb = new StringBuilder("This exceeds your ")
+                .append(type)
+                .append(" balance: ")
+                .append(plain(s.paid()))
+                .append(" day(s) paid");
         if (s.advance().signum() > 0) {
-            sb.append(", ").append(plain(s.advance()))
-              .append(" day(s) advanced leave (borrowed against future entitlement)");
+            sb.append(", ")
+                    .append(plain(s.advance()))
+                    .append(" day(s) advanced leave (borrowed against future entitlement)");
         }
         if (s.unpaid().signum() > 0) {
             sb.append(", ").append(plain(s.unpaid())).append(" day(s) unpaid");
@@ -725,20 +903,25 @@ public class LeaveService {
     }
 
     private static LocalDate joinDate(Staff staff) {
-        return (staff != null && staff.getDateJoin() != null) ? staff.getDateJoin().toLocalDate() : null;
+        return (staff != null && staff.getDateJoin() != null)
+                ? staff.getDateJoin().toLocalDate()
+                : null;
     }
 
     private Uni<Void> logSubmit(LeaveApplication e, DeviceInfo deviceInfo) {
         // Applying and cancelling both create a leave record, so both log as ADD;
         // the remark carries which one it was.
         String action = UserActionLogService.Action.ADD;
-        String remarks = (ACTION_CANCEL.equals(e.getLeaveAction())
-                ? "Requested cancellation of " : "Applied for ")
+        String remarks = (ACTION_CANCEL.equals(e.getLeaveAction()) ? "Requested cancellation of " : "Applied for ")
                 + nz(e.getLeaveType()) + " leave"
                 + (e.getTotalDays() != null ? " (" + e.getTotalDays().toPlainString() + " day(s))" : "");
         return userActionLogService.logAction(
-                currentUserService.getCurrentCompanyId(), e.getStaffId(), UserActionLogService.Module.STAFF_LEAVE,
-                truncate(String.valueOf(e.getUniqId()), LEN_LOG_REFERENCE), action, deviceInfo,
+                currentUserService.getCurrentCompanyId(),
+                e.getStaffId(),
+                UserActionLogService.Module.STAFF_LEAVE,
+                truncate(String.valueOf(e.getUniqId()), LEN_LOG_REFERENCE),
+                action,
+                deviceInfo,
                 truncate(remarks, LEN_LOG_REMARKS));
     }
 
@@ -746,37 +929,45 @@ public class LeaveService {
         if (recipients == null || recipients.isEmpty()) {
             return Uni.createFrom().voidItem();
         }
-        String who = (e.getStaffName() != null && !e.getStaffName().isBlank())
-                ? e.getStaffName() : e.getStaffId();
+        String who = (e.getStaffName() != null && !e.getStaffName().isBlank()) ? e.getStaffName() : e.getStaffId();
         boolean cancel = ACTION_CANCEL.equals(e.getLeaveAction());
-        String subject = (cancel ? "Leave cancellation request from " : "Leave application from ")
-                + who + " - " + nz(e.getLeaveType());
+        String subject = (cancel ? "Leave cancellation request from " : "Leave application from ") + who + " - "
+                + nz(e.getLeaveType());
         String desc = who + (cancel ? " has requested to cancel " : " has applied for ")
                 + nz(e.getLeaveType()) + " leave"
                 + periodText(e) + ". Please review and approve.";
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool -> {
-            Uni<Void> chain = Uni.createFrom().voidItem();
-            for (String approver : recipients) {
-                if (approver == null || approver.isBlank()) continue;
-                chain = chain.flatMap(v -> pool.withTransaction(tx ->
-                        notificationRepo.create(tx, MODULE_ID, NOTIF_TYPE_ADMIN,
-                                truncate(subject, LEN_NOTIF_SUBJECT), truncate(desc, LEN_NOTIF_DESC),
-                                approver, e.getStaffId(), String.valueOf(e.getUniqId())))
-                    .replaceWithVoid());
-            }
-            return chain;
-        }).onFailure().recoverWithItem((Void) null);
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> {
+                    Uni<Void> chain = Uni.createFrom().voidItem();
+                    for (String approver : recipients) {
+                        if (approver == null || approver.isBlank()) continue;
+                        chain = chain.flatMap(v -> pool.withTransaction(tx -> notificationRepo.create(
+                                        tx,
+                                        MODULE_ID,
+                                        NOTIF_TYPE_ADMIN,
+                                        truncate(subject, LEN_NOTIF_SUBJECT),
+                                        truncate(desc, LEN_NOTIF_DESC),
+                                        approver,
+                                        e.getStaffId(),
+                                        String.valueOf(e.getUniqId())))
+                                .replaceWithVoid());
+                    }
+                    return chain;
+                })
+                .onFailure()
+                .recoverWithItem((Void) null);
     }
 
     private Uni<String> resolveStaffId(String requestedStaffId) {
         return currentUserService.getCurrentUser().flatMap(user -> {
-            String staffId = (user != null && user.getStaffId() != null
-                    && !CurrentUserService.SYSTEM_USER.equals(user.getStaffId()))
+            String staffId = (user != null
+                            && user.getStaffId() != null
+                            && !CurrentUserService.SYSTEM_USER.equals(user.getStaffId()))
                     ? user.getStaffId()
                     : requestedStaffId;
             if (staffId == null || staffId.isBlank()) {
-                return Uni.createFrom().failure(
-                        new IllegalArgumentException("Cannot resolve the applicant (staffId)"));
+                return Uni.createFrom().failure(new IllegalArgumentException("Cannot resolve the applicant (staffId)"));
             }
             return Uni.createFrom().item(staffId);
         });
@@ -842,9 +1033,17 @@ public class LeaveService {
         return dto;
     }
 
-    private static String nz(String s) { return s == null ? "" : s; }
+    private static String nz(String s) {
+        return s == null ? "" : s;
+    }
+
     private static String truncate(String s, int max) {
         if (s == null) return null;
         return s.length() > max ? s.substring(0, max) : s;
+    }
+
+    /** Uses the request company identifier or the datasource-derived main fallback. */
+    private String resolveNotificationCompanyId(String companyId) {
+        return companyId == null || companyId.isBlank() ? defaultCompanyId : companyId;
     }
 }

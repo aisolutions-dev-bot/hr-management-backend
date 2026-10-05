@@ -1,5 +1,17 @@
 package com.aisolutions.hrmanagement.service.staffclaim;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.NotFoundException;
+
 import com.aisolutions.hrmanagement.dto.AttachmentDTO;
 import com.aisolutions.hrmanagement.dto.StaffClaimDTO;
 import com.aisolutions.hrmanagement.dto.StaffClaimDetailDTO;
@@ -10,29 +22,18 @@ import com.aisolutions.hrmanagement.repository.StaffClaimDetailRepository;
 import com.aisolutions.hrmanagement.repository.StaffClaimRepository;
 import com.aisolutions.hrmanagement.repository.StaffRepository;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
-import com.aisolutions.hrmanagement.service.notification.StaffClaimNotificationNotifier;
 import com.aisolutions.hrmanagement.service.SystemParameterService;
 import com.aisolutions.hrmanagement.service.attachment.AttachmentService;
+import com.aisolutions.hrmanagement.service.notification.StaffClaimNotificationNotifier;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService.DeviceInfo;
 import com.aisolutions.hrmanagement.util.StringNormalizer;
-import com.aisolutions.shared.tenancy.CompanyPoolManager;
 import com.aisolutions.shared.notification.NotificationTransaction;
-
+import com.aisolutions.shared.tenancy.CompanyPoolManager;
+import com.aisolutions.shared.tenancy.DefaultTenantCompanyId;
+import com.aisolutions.shared.util.DateUtil;
 import io.smallrye.mutiny.Uni;
 import io.vertx.mutiny.sqlclient.SqlClient;
-import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
-import jakarta.ws.rs.NotFoundException;
-
-import java.math.BigDecimal;
-import java.math.RoundingMode;
-import com.aisolutions.shared.util.DateUtil;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Locale;
 
 /**
  * Orchestrates the claim HEADER ({@link StaffClaim}) and its line items
@@ -47,27 +48,31 @@ import java.util.Locale;
 @ApplicationScoped
 public class StaffClaimService {
 
+    @Inject
+    @DefaultTenantCompanyId
+    String defaultCompanyId;
+
     // Header status values
-    public static final String STATUS_DRAFT      = "DRAFT";
-    public static final String STATUS_SUBMITTED  = "SUBMITTED";
-    public static final String STATUS_APPROVED   = "APPROVED";
-    public static final String STATUS_PARTIAL    = "PARTIALLY-APPROVED";
-    public static final String STATUS_REJECTED   = "REJECTED";
-    public static final String STATUS_PAID       = "PAID";
-    public static final String STATUS_VOIDED     = "VOIDED";
+    public static final String STATUS_DRAFT = "DRAFT";
+    public static final String STATUS_SUBMITTED = "SUBMITTED";
+    public static final String STATUS_APPROVED = "APPROVED";
+    public static final String STATUS_PARTIAL = "PARTIALLY-APPROVED";
+    public static final String STATUS_REJECTED = "REJECTED";
+    public static final String STATUS_PAID = "PAID";
+    public static final String STATUS_VOIDED = "VOIDED";
 
     // Line (receipt) status values — mirror hr-administration ClaimApprovalService.
     // VOID: the staff accepted a rejection, so the receipt is struck off the claim
     // and excluded from the total.
-    public static final String LINE_PENDING  = "PENDING";
+    public static final String LINE_PENDING = "PENDING";
     public static final String LINE_APPROVED = "APPROVED";
     public static final String LINE_REJECTED = "REJECTED";
-    public static final String LINE_VOID     = "VOID";
+    public static final String LINE_VOID = "VOID";
 
     private static final int LEN_DESCRIPTION = 100;
 
     private static final int LEN_STAFF_ID = 25;
-    private static final int LEN_PERIOD   = 50;
+    private static final int LEN_PERIOD = 50;
 
     /**
      * Claim periods read as JULY-2026. Locale is pinned to ENGLISH so the period a
@@ -75,8 +80,7 @@ public class StaffClaimService {
      * as JUILLET-2026 would silently fail to match the same month's existing header
      * and auto-create a duplicate.
      */
-    private static final DateTimeFormatter PERIOD_FORMAT =
-            DateTimeFormatter.ofPattern("MMMM-yyyy", Locale.ENGLISH);
+    private static final DateTimeFormatter PERIOD_FORMAT = DateTimeFormatter.ofPattern("MMMM-yyyy", Locale.ENGLISH);
 
     // ── Audit-log + notification wiring ──
     /** m07UserActionLog.Module / m07Notifications.ModuleId for HRMS claim actions. */
@@ -87,33 +91,54 @@ public class StaffClaimService {
     private static final String NOTIF_TYPE_ADMIN = "Admin-Claims";
     /** System parameter naming the staff who receives claim-submitted notifications. */
     private static final String PARAM_HR_APPROVER = "HR-ADMIN-APPRV-IN-CHARGE";
-    private static final int LEN_LOG_REFERENCE = 45;   // m07UserActionLog.ReferenceNo
-    private static final int LEN_LOG_REMARKS   = 255;  // m07UserActionLog.Remarks
-    private static final int LEN_NOTIF_SUBJECT = 200;  // m07Notifications.NotificationSubject
-    private static final int LEN_NOTIF_DESC    = 255;  // m07Notifications.NotificationDesc
-    private static final DateTimeFormatter TS_FORMAT =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
-    @Inject StaffClaimRepository headerRepo;
-    @Inject StaffClaimDetailRepository detailRepo;
-    @Inject StaffClaimDetailService detailService;
-    @Inject CurrentUserService currentUserService;
-    @Inject AttachmentService attachmentService;
-    @Inject UserActionLogService userActionLogService;
-    @Inject NotificationRepository notificationRepo;
-    @Inject StaffRepository staffRepo;
-    @Inject SystemParameterService systemParameterService;
-    @Inject CompanyPoolManager companyPoolManager;
-    @Inject StaffClaimNotificationNotifier staffClaimNotificationNotifier;
+    private static final int LEN_LOG_REFERENCE = 45; // m07UserActionLog.ReferenceNo
+    private static final int LEN_LOG_REMARKS = 255; // m07UserActionLog.Remarks
+    private static final int LEN_NOTIF_SUBJECT = 200; // m07Notifications.NotificationSubject
+    private static final int LEN_NOTIF_DESC = 255; // m07Notifications.NotificationDesc
+    private static final DateTimeFormatter TS_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+
+    @Inject
+    StaffClaimRepository headerRepo;
+
+    @Inject
+    StaffClaimDetailRepository detailRepo;
+
+    @Inject
+    StaffClaimDetailService detailService;
+
+    @Inject
+    CurrentUserService currentUserService;
+
+    @Inject
+    AttachmentService attachmentService;
+
+    @Inject
+    UserActionLogService userActionLogService;
+
+    @Inject
+    NotificationRepository notificationRepo;
+
+    @Inject
+    StaffRepository staffRepo;
+
+    @Inject
+    SystemParameterService systemParameterService;
+
+    @Inject
+    CompanyPoolManager companyPoolManager;
+
+    @Inject
+    StaffClaimNotificationNotifier staffClaimNotificationNotifier;
 
     // ─────────────────────────────────────────────────────────
     //  CREATE DRAFT
     // ─────────────────────────────────────────────────────────
 
     public Uni<StaffClaimDTO> createDraft(StaffClaimDTO dto) {
-        return resolveStaffId(dto.getStaffId()).flatMap(staffId ->
-                createDraftFor(staffId, dto.getClaimPeriod())
-                        .map(saved -> toHeaderDto(saved, null)));
+        return resolveStaffId(dto.getStaffId())
+                .flatMap(staffId ->
+                        createDraftFor(staffId, dto.getClaimPeriod()).map(saved -> toHeaderDto(saved, null)));
     }
 
     /**
@@ -142,25 +167,23 @@ public class StaffClaimService {
      */
     public Uni<StaffClaimDTO> getOrCreateCurrentDraft(String requestedStaffId) {
         String period = currentPeriod();
-        return resolveStaffId(requestedStaffId).flatMap(staffId ->
-            companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-                headerRepo.findByStaffPeriodStatus(pool, staffId, period, STATUS_DRAFT)
-                    .flatMap(existing -> existing != null
-                            ? Uni.createFrom().item(existing)
-                            : createDraftFor(staffId, period))
-                    .flatMap(h -> getWithLines(h.getUniqId()))
-            ));
+        return resolveStaffId(requestedStaffId)
+                .flatMap(staffId -> companyPoolManager
+                        .poolFor(currentUserService.getCurrentCompanyId())
+                        .flatMap(pool -> headerRepo
+                                .findByStaffPeriodStatus(pool, staffId, period, STATUS_DRAFT)
+                                .flatMap(existing -> existing != null
+                                        ? Uni.createFrom().item(existing)
+                                        : createDraftFor(staffId, period))
+                                .flatMap(h -> getWithLines(h.getUniqId()))));
     }
 
     /** Resolves the claimant: the logged-in user wins, falling back to the requested id. */
     private Uni<String> resolveStaffId(String requestedStaffId) {
         return currentUserService.getCurrentUser().flatMap(user -> {
-            String staffId = (user != null && user.getStaffId() != null)
-                    ? user.getStaffId()
-                    : requestedStaffId;
+            String staffId = (user != null && user.getStaffId() != null) ? user.getStaffId() : requestedStaffId;
             if (StringNormalizer.isBlank(staffId)) {
-                return Uni.createFrom().failure(
-                        new IllegalArgumentException("Cannot resolve the claimant (staffId)"));
+                return Uni.createFrom().failure(new IllegalArgumentException("Cannot resolve the claimant (staffId)"));
             }
             return Uni.createFrom().item(staffId);
         });
@@ -177,8 +200,9 @@ public class StaffClaimService {
         h.setEntryDate(now);
         h.setLastEditStaff(h.getStaffId());
         h.setLastEditDate(now);
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
-            .flatMap(pool -> pool.withTransaction(tx -> headerRepo.save(tx, h)));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> pool.withTransaction(tx -> headerRepo.save(tx, h)));
     }
 
     // ─────────────────────────────────────────────────────────
@@ -187,37 +211,41 @@ public class StaffClaimService {
 
     /** Header-level list for a staff member (no line items, but with line counts). */
     public Uni<List<StaffClaimDTO>> listByStaff(String staffId) {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-            headerRepo.findByStaff(pool, staffId).flatMap(headers -> {
-                if (headers.isEmpty()) {
-                    return Uni.createFrom().item(List.<StaffClaimDTO>of());
-                }
-                List<Long> ids = headers.stream().map(h -> h.getUniqId()).toList();
-                return detailRepo.countByHeaderIds(pool, ids).map(rows -> {
-                    java.util.Map<Long, Integer> counts = new java.util.HashMap<>();
-                    for (io.vertx.mutiny.sqlclient.Row r : rows) {
-                        counts.put(r.getLong("ClaimId"), r.getInteger("cnt"));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> headerRepo.findByStaff(pool, staffId).flatMap(headers -> {
+                    if (headers.isEmpty()) {
+                        return Uni.createFrom().item(List.<StaffClaimDTO>of());
                     }
-                    return headers.stream().map(h -> {
-                        StaffClaimDTO dto = toHeaderDto(h, null);
-                        dto.setLineCount(counts.getOrDefault(h.getUniqId(), 0));
-                        return dto;
-                    }).toList();
-                });
-            }));
+                    List<Long> ids = headers.stream().map(h -> h.getUniqId()).toList();
+                    return detailRepo.countByHeaderIds(pool, ids).map(rows -> {
+                        java.util.Map<Long, Integer> counts = new java.util.HashMap<>();
+                        for (io.vertx.mutiny.sqlclient.Row r : rows) {
+                            counts.put(r.getLong("ClaimId"), r.getInteger("cnt"));
+                        }
+                        return headers.stream()
+                                .map(h -> {
+                                    StaffClaimDTO dto = toHeaderDto(h, null);
+                                    dto.setLineCount(counts.getOrDefault(h.getUniqId(), 0));
+                                    return dto;
+                                })
+                                .toList();
+                    });
+                }));
     }
 
     /** One claim with all its line items populated. */
     public Uni<StaffClaimDTO> getWithLines(Long headerId) {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-            headerRepo.findById(pool, headerId).flatMap(h -> {
-                if (h == null) return Uni.createFrom().nullItem();
-                return detailRepo.findByHeaderId(pool, headerId).map(lines -> {
-                    List<StaffClaimDetailDTO> lineDtos =
-                            lines.stream().map(detailService::toDtoBasic).toList();
-                    return toHeaderDto(h, lineDtos);
-                });
-            }));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> headerRepo.findById(pool, headerId).flatMap(h -> {
+                    if (h == null) return Uni.createFrom().nullItem();
+                    return detailRepo.findByHeaderId(pool, headerId).map(lines -> {
+                        List<StaffClaimDetailDTO> lineDtos =
+                                lines.stream().map(detailService::toDtoBasic).toList();
+                        return toHeaderDto(h, lineDtos);
+                    });
+                }));
     }
 
     // ─────────────────────────────────────────────────────────
@@ -225,36 +253,43 @@ public class StaffClaimService {
     // ─────────────────────────────────────────────────────────
 
     public Uni<StaffClaimDetailDTO> addLine(
-            Long headerId, StaffClaimDetailDTO lineDto,
-            byte[] photoData, String photoFileName, String photoContentType,
+            Long headerId,
+            StaffClaimDetailDTO lineDto,
+            byte[] photoData,
+            String photoFileName,
+            String photoContentType,
             DeviceInfo deviceInfo) {
 
         return requireDraft(headerId).flatMap(h -> {
             lineDto.setClaimId(headerId);
-            return detailService.createClaim(lineDto, photoData, photoFileName, photoContentType)
+            return detailService
+                    .createClaim(lineDto, photoData, photoFileName, photoContentType)
                     .flatMap(saved -> recalcTotal(headerId).replaceWith(saved))
-                    .call(saved -> logAction(saved.getStaffId(), h.getClaimPeriod(),
+                    .call(saved -> logAction(
+                            saved.getStaffId(),
+                            h.getClaimPeriod(),
                             UserActionLogService.Action.ADD,
-                            "Added receipt " + nz(saved.getReceiptNumber())
-                                    + " (" + nz(saved.getClaimType()) + ")", deviceInfo));
+                            "Added receipt " + nz(saved.getReceiptNumber()) + " (" + nz(saved.getClaimType()) + ")",
+                            deviceInfo));
         });
     }
 
     public Uni<Void> removeLine(Long headerId, Long lineId) {
-        return requireDraft(headerId).flatMap(h ->
-            // Remove the line's receipt attachment(s) first (FTP file + m10Attachments row),
-            // so deleting a draft receipt never leaves an orphaned file/record behind.
-            deleteLineAttachments(lineId)
-                .flatMap(ignored -> companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
-                    .flatMap(pool -> pool.withTransaction(tx -> detailRepo.deleteById(tx, lineId))))
-                .flatMap(deleted -> {
-                    if (Boolean.FALSE.equals(deleted)) {
-                        return Uni.createFrom().failure(
-                                new NotFoundException("Line " + lineId + " not found"));
-                    }
-                    return recalcTotal(headerId).replaceWithVoid();
-                })
-        );
+        return requireDraft(headerId)
+                .flatMap(h ->
+                        // Remove the line's receipt attachment(s) first (FTP file + m10Attachments row),
+                        // so deleting a draft receipt never leaves an orphaned file/record behind.
+                        deleteLineAttachments(lineId)
+                                .flatMap(ignored -> companyPoolManager
+                                        .poolFor(currentUserService.getCurrentCompanyId())
+                                        .flatMap(pool -> pool.withTransaction(tx -> detailRepo.deleteById(tx, lineId))))
+                                .flatMap(deleted -> {
+                                    if (Boolean.FALSE.equals(deleted)) {
+                                        return Uni.createFrom()
+                                                .failure(new NotFoundException("Line " + lineId + " not found"));
+                                    }
+                                    return recalcTotal(headerId).replaceWithVoid();
+                                }));
     }
 
     /**
@@ -271,8 +306,9 @@ public class StaffClaimService {
                         return chain;
                     }
                     for (AttachmentDTO att : atts) {
-                        chain = chain.flatMap(v ->
-                                attachmentService.deleteAttachment(att.getUniqId()).replaceWithVoid());
+                        chain = chain.flatMap(v -> attachmentService
+                                .deleteAttachment(att.getUniqId())
+                                .replaceWithVoid());
                     }
                     return chain;
                 });
@@ -288,37 +324,41 @@ public class StaffClaimService {
      * to {@link StaffClaimNotificationNotifier}.
      */
     public Uni<StaffClaimDTO> submit(Long headerId, DeviceInfo deviceInfo) {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-            detailRepo.findByHeaderId(pool, headerId).flatMap(lines -> {
-                if (lines.isEmpty()) {
-                    return Uni.createFrom().failure(
-                            new IllegalArgumentException("Cannot submit a claim with no line items"));
-                }
-                BigDecimal total = sumClaimAmount(lines);
-                LocalDateTime now = DateUtil.nowSGT();
-                String companyId = currentUserService.getCurrentCompanyId();
-                return pool.withTransaction(tx -> applySubmitTransition(tx, headerId, total, now)
-                        .flatMap(saved -> stageClaimSubmittedNotification(
-                                    tx, toHeaderDto(saved, null), "submitted", companyId)
-                                .replaceWith(toHeaderDto(saved, null))))
-                    .call(dto -> logAction(dto.getEntryStaff(), dto.getClaimPeriod(),
-                            UserActionLogService.Action.ADD,
-                            "Submitted claim " + nz(dto.getClaimPeriod()) + " of amount "
-                                    + plain(dto.getClaimAmount()), deviceInfo))
-                    .call(this::notifyClaimSubmitted);
-            }));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> detailRepo.findByHeaderId(pool, headerId).flatMap(lines -> {
+                    if (lines.isEmpty()) {
+                        return Uni.createFrom()
+                                .failure(new IllegalArgumentException("Cannot submit a claim with no line items"));
+                    }
+                    BigDecimal total = sumClaimAmount(lines);
+                    LocalDateTime now = DateUtil.nowSGT();
+                    String companyId = currentUserService.getCurrentCompanyId();
+                    return pool.withTransaction(tx -> applySubmitTransition(tx, headerId, total, now)
+                                    .flatMap(saved -> stageClaimSubmittedNotification(
+                                                    tx, toHeaderDto(saved, null), "submitted", companyId)
+                                            .replaceWith(toHeaderDto(saved, null))))
+                            .call(dto -> logAction(
+                                    dto.getEntryStaff(),
+                                    dto.getClaimPeriod(),
+                                    UserActionLogService.Action.ADD,
+                                    "Submitted claim " + nz(dto.getClaimPeriod()) + " of amount "
+                                            + plain(dto.getClaimAmount()),
+                                    deviceInfo))
+                            .call(this::notifyClaimSubmitted);
+                }));
     }
 
     /** Validates the draft header, applies the numbered period and persists the SUBMITTED state. */
     private Uni<StaffClaim> applySubmitTransition(SqlClient tx, Long headerId, BigDecimal total, LocalDateTime now) {
         return headerRepo.findById(tx, headerId).flatMap(h -> {
             if (h == null) {
-                return Uni.<StaffClaim>createFrom().failure(
-                        new NotFoundException("Claim " + headerId + " not found"));
+                return Uni.<StaffClaim>createFrom().failure(new NotFoundException("Claim " + headerId + " not found"));
             }
             if (!STATUS_DRAFT.equals(h.getStatus())) {
-                return Uni.<StaffClaim>createFrom().failure(new IllegalArgumentException(
-                        "Only a DRAFT claim can be submitted (current status: " + h.getStatus() + ")"));
+                return Uni.<StaffClaim>createFrom()
+                        .failure(new IllegalArgumentException(
+                                "Only a DRAFT claim can be submitted (current status: " + h.getStatus() + ")"));
             }
             // Number the period at submit (JULY-2026 → JULY-2026-001) so multiple
             // claims in one month are distinguishable. Drafts keep the plain month so
@@ -326,7 +366,8 @@ public class StaffClaimService {
             String basePeriod = h.getClaimPeriod();
             Uni<String> numberedPeriod = StringNormalizer.isBlank(basePeriod)
                     ? Uni.createFrom().item(basePeriod)
-                    : headerRepo.findPeriodsWithSuffix(tx, h.getStaffId(), basePeriod)
+                    : headerRepo
+                            .findPeriodsWithSuffix(tx, h.getStaffId(), basePeriod)
                             .map(existing -> nextNumberedPeriod(basePeriod, existing));
             return numberedPeriod.flatMap(period -> {
                 h.setClaimPeriod(period);
@@ -340,10 +381,10 @@ public class StaffClaimService {
     }
 
     /** Delegates claim-submitted envelope staging to {@link StaffClaimNotificationNotifier}. */
-    private Uni<Void> stageClaimSubmittedNotification(SqlClient tx, StaffClaimDTO claim,
-                                                       String claimAction, String companyId) {
+    private Uni<Void> stageClaimSubmittedNotification(
+            SqlClient tx, StaffClaimDTO claim, String claimAction, String companyId) {
         return staffClaimNotificationNotifier.notifyClaimSubmitted(
-                new NotificationTransaction(tx, companyId), claim, claimAction);
+                new NotificationTransaction(tx, resolveNotificationCompanyId(companyId)), claim, claimAction);
     }
 
     /**
@@ -358,8 +399,7 @@ public class StaffClaimService {
      */
     public Uni<List<StaffClaimDTO>> submitBatch(List<Long> headerIds, DeviceInfo deviceInfo) {
         if (headerIds == null || headerIds.isEmpty()) {
-            return Uni.createFrom().failure(
-                    new IllegalArgumentException("Select at least one claim to submit"));
+            return Uni.createFrom().failure(new IllegalArgumentException("Select at least one claim to submit"));
         }
         List<Long> ids = headerIds.stream().distinct().toList();
 
@@ -380,16 +420,19 @@ public class StaffClaimService {
 
     /** Fails unless the claim exists, is still a DRAFT, and has at least one line. */
     private Uni<Void> requireSubmittable(Long headerId) {
-        return requireDraft(headerId).flatMap(h ->
-            companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-                detailRepo.findByHeaderId(pool, headerId).flatMap(lines -> {
-                    if (lines.isEmpty()) {
-                        return Uni.createFrom().failure(new IllegalArgumentException(
-                                "Claim " + h.getClaimPeriod() + " has no receipts and cannot be submitted"));
-                    }
-                    return Uni.createFrom().voidItem();
-                })
-            ));
+        return requireDraft(headerId)
+                .flatMap(h -> companyPoolManager
+                        .poolFor(currentUserService.getCurrentCompanyId())
+                        .flatMap(pool -> detailRepo
+                                .findByHeaderId(pool, headerId)
+                                .flatMap(lines -> {
+                                    if (lines.isEmpty()) {
+                                        return Uni.createFrom()
+                                                .failure(new IllegalArgumentException("Claim " + h.getClaimPeriod()
+                                                        + " has no receipts and cannot be submitted"));
+                                    }
+                                    return Uni.createFrom().voidItem();
+                                })));
     }
 
     // ─────────────────────────────────────────────────────────
@@ -398,32 +441,36 @@ public class StaffClaimService {
 
     /** Loads the header and fails unless it exists and is still a DRAFT. */
     private Uni<StaffClaim> requireDraft(Long headerId) {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-            headerRepo.findById(pool, headerId).flatMap(h -> {
-                if (h == null) {
-                    return Uni.createFrom().failure(
-                            new NotFoundException("Claim " + headerId + " not found"));
-                }
-                if (!STATUS_DRAFT.equals(h.getStatus())) {
-                    return Uni.createFrom().failure(new IllegalArgumentException(
-                            "Claim is no longer a draft (status: " + h.getStatus() + ") and cannot be modified"));
-                }
-                return Uni.createFrom().item(h);
-            }));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> headerRepo.findById(pool, headerId).flatMap(h -> {
+                    if (h == null) {
+                        return Uni.createFrom().failure(new NotFoundException("Claim " + headerId + " not found"));
+                    }
+                    if (!STATUS_DRAFT.equals(h.getStatus())) {
+                        return Uni.createFrom()
+                                .failure(new IllegalArgumentException("Claim is no longer a draft (status: "
+                                        + h.getStatus() + ") and cannot be modified"));
+                    }
+                    return Uni.createFrom().item(h);
+                }));
     }
 
     /** Recomputes header ClaimAmount = sum of its line ClaimAmounts. */
     private Uni<StaffClaim> recalcTotal(Long headerId) {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-            detailRepo.findByHeaderId(pool, headerId).flatMap(lines -> {
-                BigDecimal total = sumClaimAmount(lines);
-                return pool.withTransaction(tx -> headerRepo.findById(tx, headerId).flatMap(h -> {
-                    if (h == null) return Uni.createFrom().nullItem();
-                    h.setClaimAmount(total);
-                    h.setLastEditDate(DateUtil.nowSGT());
-                    return headerRepo.update(tx, h);
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> detailRepo.findByHeaderId(pool, headerId).flatMap(lines -> {
+                    BigDecimal total = sumClaimAmount(lines);
+                    return pool.withTransaction(tx -> headerRepo
+                            .findById(tx, headerId)
+                            .flatMap(h -> {
+                                if (h == null) return Uni.createFrom().nullItem();
+                                h.setClaimAmount(total);
+                                h.setLastEditDate(DateUtil.nowSGT());
+                                return headerRepo.update(tx, h);
+                            }));
                 }));
-            }));
     }
 
     // ─────────────────────────────────────────────────────────
@@ -436,27 +483,32 @@ public class StaffClaimService {
      * header total + status are rolled up afterwards.
      */
     public Uni<StaffClaimDTO> acceptRejection(Long headerId, Long lineId, DeviceInfo deviceInfo) {
-        return currentUserService.getCurrentUserLoginId().flatMap(actor ->
-            companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-                pool.withTransaction(tx ->
-                    requireLine(headerId, lineId).flatMap(line -> {
-                        if (!LINE_REJECTED.equalsIgnoreCase(line.getStatus())) {
-                            return Uni.<StaffClaimDetail>createFrom().failure(new IllegalArgumentException(
-                                    "Only a rejected receipt can be voided (current status: "
-                                            + line.getStatus() + ")"));
-                        }
-                        LocalDateTime now = DateUtil.nowSGT();
-                        line.setStatus(LINE_VOID);
-                        line.setLastEditStaff(actor);
-                        line.setLastEditDate(now);
-                        return detailRepo.update(tx, line);
-                    })
-                ))
-            .flatMap(v -> recalcAndRollup(headerId, actor))
-            .flatMap(h -> getWithLines(headerId))
-            .call(dto -> logAction(actor, dto.getClaimPeriod(), UserActionLogService.Action.VOID,
-                    "Accepted rejection — voided receipt " + lineId, deviceInfo))
-        );
+        return currentUserService
+                .getCurrentUserLoginId()
+                .flatMap(actor -> companyPoolManager
+                        .poolFor(currentUserService.getCurrentCompanyId())
+                        .flatMap(pool -> pool.withTransaction(tx -> requireLine(headerId, lineId)
+                                .flatMap(line -> {
+                                    if (!LINE_REJECTED.equalsIgnoreCase(line.getStatus())) {
+                                        return Uni.<StaffClaimDetail>createFrom()
+                                                .failure(new IllegalArgumentException(
+                                                        "Only a rejected receipt can be voided (current status: "
+                                                                + line.getStatus() + ")"));
+                                    }
+                                    LocalDateTime now = DateUtil.nowSGT();
+                                    line.setStatus(LINE_VOID);
+                                    line.setLastEditStaff(actor);
+                                    line.setLastEditDate(now);
+                                    return detailRepo.update(tx, line);
+                                })))
+                        .flatMap(v -> recalcAndRollup(headerId, actor))
+                        .flatMap(h -> getWithLines(headerId))
+                        .call(dto -> logAction(
+                                actor,
+                                dto.getClaimPeriod(),
+                                UserActionLogService.Action.VOID,
+                                "Accepted rejection — voided receipt " + lineId,
+                                deviceInfo)));
     }
 
     /**
@@ -465,95 +517,109 @@ public class StaffClaimService {
      * review. An optional appeal note is written to the receipt's description.
      * (Re-attaching the receipt photo is a separate call on the attachment endpoint.)
      */
-    public Uni<StaffClaimDTO> resubmitRejectedLine(Long headerId, Long lineId,
-            String appealDescription, DeviceInfo deviceInfo) {
+    public Uni<StaffClaimDTO> resubmitRejectedLine(
+            Long headerId, Long lineId, String appealDescription, DeviceInfo deviceInfo) {
         return currentUserService.getCurrentUserLoginId().flatMap(actor -> {
             String companyId = currentUserService.getCurrentCompanyId();
-            return companyPoolManager.poolFor(companyId).flatMap(pool ->
-                pool.withTransaction(tx ->
-                    requireLine(headerId, lineId).flatMap(line -> {
-                        if (!LINE_REJECTED.equalsIgnoreCase(line.getStatus())) {
-                            return Uni.<StaffClaimDetail>createFrom().failure(new IllegalArgumentException(
-                                    "Only a rejected receipt can be resubmitted (current status: "
-                                            + line.getStatus() + ")"));
-                        }
-                        LocalDateTime now = DateUtil.nowSGT();
-                        if (appealDescription != null && !appealDescription.isBlank()) {
-                            String d = appealDescription.trim();
-                            line.setClaimDescription(
-                                    d.length() > LEN_DESCRIPTION ? d.substring(0, LEN_DESCRIPTION) : d);
-                        }
-                        line.setStatus(LINE_PENDING);
-                        line.setApprovedBy(null);
-                        line.setApprovedDate(null);
-                        // RejectReason is left intact as history; the reject trail also lives
-                        // in m07UserActionLog.
-                        line.setLastEditStaff(actor);
-                        line.setLastEditDate(now);
-                        return detailRepo.update(tx, line);
-                    })
-                    .flatMap(updated -> stageClaimResubmittedNotification(tx, headerId, companyId)
-                            .replaceWith(updated))
-                ))
-                .flatMap(v -> recalcAndRollup(headerId, actor))
-                .flatMap(h -> getWithLines(headerId))
-                .call(dto -> logAction(actor, dto.getClaimPeriod(), UserActionLogService.Action.EDIT,
-                        "Resubmitted receipt " + lineId
-                                + (appealDescription != null && !appealDescription.isBlank()
-                                        ? " with appeal" : ""), deviceInfo))
-                .call(this::notifyClaimResubmitted);
+            return companyPoolManager
+                    .poolFor(companyId)
+                    .flatMap(pool -> pool.withTransaction(tx -> requireLine(headerId, lineId)
+                            .flatMap(line -> {
+                                if (!LINE_REJECTED.equalsIgnoreCase(line.getStatus())) {
+                                    return Uni.<StaffClaimDetail>createFrom()
+                                            .failure(new IllegalArgumentException(
+                                                    "Only a rejected receipt can be resubmitted (current status: "
+                                                            + line.getStatus() + ")"));
+                                }
+                                LocalDateTime now = DateUtil.nowSGT();
+                                if (appealDescription != null && !appealDescription.isBlank()) {
+                                    String d = appealDescription.trim();
+                                    line.setClaimDescription(
+                                            d.length() > LEN_DESCRIPTION ? d.substring(0, LEN_DESCRIPTION) : d);
+                                }
+                                line.setStatus(LINE_PENDING);
+                                line.setApprovedBy(null);
+                                line.setApprovedDate(null);
+                                // RejectReason is left intact as history; the reject trail also lives
+                                // in m07UserActionLog.
+                                line.setLastEditStaff(actor);
+                                line.setLastEditDate(now);
+                                return detailRepo.update(tx, line);
+                            })
+                            .flatMap(updated -> stageClaimResubmittedNotification(tx, headerId, companyId)
+                                    .replaceWith(updated))))
+                    .flatMap(v -> recalcAndRollup(headerId, actor))
+                    .flatMap(h -> getWithLines(headerId))
+                    .call(dto -> logAction(
+                            actor,
+                            dto.getClaimPeriod(),
+                            UserActionLogService.Action.EDIT,
+                            "Resubmitted receipt " + lineId
+                                    + (appealDescription != null && !appealDescription.isBlank() ? " with appeal" : ""),
+                            deviceInfo))
+                    .call(this::notifyClaimResubmitted);
         });
     }
 
     /** Resolves the claim header and delegates resubmitted content staging to StaffClaimNotificationNotifier. */
     private Uni<Void> stageClaimResubmittedNotification(SqlClient tx, Long headerId, String companyId) {
-        return headerRepo.findById(tx, headerId)
+        return headerRepo
+                .findById(tx, headerId)
                 .flatMap(header -> header == null
                         ? Uni.createFrom().voidItem()
                         : staffClaimNotificationNotifier.notifyClaimSubmitted(
-                                new NotificationTransaction(tx, companyId),
-                                toHeaderDto(header, null), "resubmitted"));
+                                new NotificationTransaction(tx, resolveNotificationCompanyId(companyId)),
+                                toHeaderDto(header, null),
+                                "resubmitted"));
     }
 
     /**
      * Staff fixes a rejected receipt (details + amount + optional new photo) and resubmits
      * it (→ PENDING). Project, Claim Type, Description and Claim Date are locked.
      */
-    public Uni<StaffClaimDTO> editRejectedLine(Long headerId, Long lineId, StaffClaimDetailDTO dto,
-            byte[] photoData, String photoFileName, String photoContentType) {
+    public Uni<StaffClaimDTO> editRejectedLine(
+            Long headerId,
+            Long lineId,
+            StaffClaimDetailDTO dto,
+            byte[] photoData,
+            String photoFileName,
+            String photoContentType) {
         return currentUserService.getCurrentUserLoginId().flatMap(actor -> {
             String companyId = currentUserService.getCurrentCompanyId();
-            return requireLine(headerId, lineId).flatMap(line -> {
-                if (!LINE_REJECTED.equalsIgnoreCase(line.getStatus())) {
-                    return Uni.<StaffClaimDetail>createFrom().failure(new IllegalArgumentException(
-                            "Only a rejected receipt can be edited (current status: "
-                                    + line.getStatus() + ")"));
-                }
-                // Convert the edited amount to base before the write transaction (mirrors create);
-                // the locked claim date is the rate-date fallback.
-                return detailService.convertForEdit(dto, line.getClaimDate()).flatMap(conv ->
-                    companyPoolManager.poolFor(companyId).flatMap(pool ->
-                        pool.withTransaction(tx ->
-                            requireLine(headerId, lineId).flatMap(fresh -> {
-                                detailService.applyEditedFields(fresh, dto, conv);
-                                LocalDateTime now = DateUtil.nowSGT();
-                                fresh.setStatus(LINE_PENDING);
-                                fresh.setApprovedBy(null);
-                                fresh.setApprovedDate(null);
-                                fresh.setLastEditStaff(actor);
-                                fresh.setLastEditDate(now);
-                                return detailRepo.update(tx, fresh);
-                            }).flatMap(updated ->
-                                stageClaimResubmittedNotification(tx, headerId, companyId).replaceWith(updated))
-                        )
-                    )
-                );
-            })
-            .flatMap(saved -> applyPhotoChange(lineId, photoData, photoFileName, photoContentType)
-                    .replaceWith(saved))
-            .flatMap(v -> recalcAndRollup(headerId, actor))
-            .flatMap(h -> getWithLines(headerId))
-            .call(this::notifyClaimResubmitted);
+            return requireLine(headerId, lineId)
+                    .flatMap(line -> {
+                        if (!LINE_REJECTED.equalsIgnoreCase(line.getStatus())) {
+                            return Uni.<StaffClaimDetail>createFrom()
+                                    .failure(new IllegalArgumentException(
+                                            "Only a rejected receipt can be edited (current status: " + line.getStatus()
+                                                    + ")"));
+                        }
+                        // Convert the edited amount to base before the write transaction (mirrors create);
+                        // the locked claim date is the rate-date fallback.
+                        return detailService
+                                .convertForEdit(dto, line.getClaimDate())
+                                .flatMap(conv -> companyPoolManager
+                                        .poolFor(companyId)
+                                        .flatMap(pool -> pool.withTransaction(tx -> requireLine(headerId, lineId)
+                                                .flatMap(fresh -> {
+                                                    detailService.applyEditedFields(fresh, dto, conv);
+                                                    LocalDateTime now = DateUtil.nowSGT();
+                                                    fresh.setStatus(LINE_PENDING);
+                                                    fresh.setApprovedBy(null);
+                                                    fresh.setApprovedDate(null);
+                                                    fresh.setLastEditStaff(actor);
+                                                    fresh.setLastEditDate(now);
+                                                    return detailRepo.update(tx, fresh);
+                                                })
+                                                .flatMap(updated -> stageClaimResubmittedNotification(
+                                                                tx, headerId, companyId)
+                                                        .replaceWith(updated)))));
+                    })
+                    .flatMap(saved -> applyPhotoChange(lineId, photoData, photoFileName, photoContentType)
+                            .replaceWith(saved))
+                    .flatMap(v -> recalcAndRollup(headerId, actor))
+                    .flatMap(h -> getWithLines(headerId))
+                    .call(this::notifyClaimResubmitted);
         });
     }
 
@@ -561,33 +627,37 @@ public class StaffClaimService {
      * Uploads a replacement receipt photo as a new version (the old one is kept). Runs
      * outside the row transaction; a failed upload never undoes the committed edit.
      */
-    private Uni<Void> applyPhotoChange(Long lineId,
-            byte[] photoData, String photoFileName, String photoContentType) {
+    private Uni<Void> applyPhotoChange(Long lineId, byte[] photoData, String photoFileName, String photoContentType) {
         if (photoData != null && photoData.length > 0) {
-            return attachmentService.uploadFile(
-                    StaffClaimDetailService.MODULE_TYPE, String.valueOf(lineId),
-                    photoFileName != null ? photoFileName : "receipt.jpg",
-                    photoContentType != null ? photoContentType : "image/jpeg",
-                    photoData)
-                .replaceWithVoid()
-                .onFailure().recoverWithItem((Void) null);
+            return attachmentService
+                    .uploadFile(
+                            StaffClaimDetailService.MODULE_TYPE,
+                            String.valueOf(lineId),
+                            photoFileName != null ? photoFileName : "receipt.jpg",
+                            photoContentType != null ? photoContentType : "image/jpeg",
+                            photoData)
+                    .replaceWithVoid()
+                    .onFailure()
+                    .recoverWithItem((Void) null);
         }
         return Uni.createFrom().voidItem();
     }
 
     /** Loads a receipt and fails unless it exists and belongs to the given claim. */
     private Uni<StaffClaimDetail> requireLine(Long headerId, Long lineId) {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-            detailRepo.findById(pool, lineId).flatMap(line -> {
-                if (line == null) {
-                    return Uni.createFrom().failure(new NotFoundException("Receipt " + lineId + " not found"));
-                }
-                if (!headerId.equals(line.getClaimId())) {
-                    return Uni.createFrom().failure(new IllegalArgumentException(
-                            "Receipt " + lineId + " does not belong to claim " + headerId));
-                }
-                return Uni.createFrom().item(line);
-            }));
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> detailRepo.findById(pool, lineId).flatMap(line -> {
+                    if (line == null) {
+                        return Uni.createFrom().failure(new NotFoundException("Receipt " + lineId + " not found"));
+                    }
+                    if (!headerId.equals(line.getClaimId())) {
+                        return Uni.createFrom()
+                                .failure(new IllegalArgumentException(
+                                        "Receipt " + lineId + " does not belong to claim " + headerId));
+                    }
+                    return Uni.createFrom().item(line);
+                }));
     }
 
     /**
@@ -596,77 +666,80 @@ public class StaffClaimService {
      * hr-administration ClaimApprovalService, with voided receipts struck off entirely.
      */
     private Uni<StaffClaim> recalcAndRollup(Long headerId, String actor) {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-            detailRepo.findByHeaderId(pool, headerId).flatMap(lines -> {
-                BigDecimal total = sumClaimAmount(lines); // voided receipts excluded
-                int approved = 0, rejected = 0, pending = 0, voided = 0;
-                BigDecimal approvedAmt = BigDecimal.ZERO;
-                BigDecimal rejectedAmt = BigDecimal.ZERO;
-                for (StaffClaimDetail l : lines) {
-                    String st = l.getStatus();
-                    BigDecimal amt = l.getClaimAmount() == null ? BigDecimal.ZERO : l.getClaimAmount();
-                    if (LINE_VOID.equalsIgnoreCase(st)) {
-                        // Accepted rejection: struck off entirely — excluded from the claim total and
-                        // from every amount (approved/rejected), as if the receipt no longer exists.
-                        voided++;
-                        continue;
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> detailRepo.findByHeaderId(pool, headerId).flatMap(lines -> {
+                    BigDecimal total = sumClaimAmount(lines); // voided receipts excluded
+                    int approved = 0, rejected = 0, pending = 0, voided = 0;
+                    BigDecimal approvedAmt = BigDecimal.ZERO;
+                    BigDecimal rejectedAmt = BigDecimal.ZERO;
+                    for (StaffClaimDetail l : lines) {
+                        String st = l.getStatus();
+                        BigDecimal amt = l.getClaimAmount() == null ? BigDecimal.ZERO : l.getClaimAmount();
+                        if (LINE_VOID.equalsIgnoreCase(st)) {
+                            // Accepted rejection: struck off entirely — excluded from the claim total and
+                            // from every amount (approved/rejected), as if the receipt no longer exists.
+                            voided++;
+                            continue;
+                        }
+                        if (LINE_APPROVED.equalsIgnoreCase(st)) {
+                            approved++;
+                            approvedAmt = approvedAmt.add(amt);
+                        } else if (LINE_REJECTED.equalsIgnoreCase(st)) {
+                            rejected++;
+                            rejectedAmt = rejectedAmt.add(amt);
+                        } else {
+                            pending++;
+                        }
                     }
-                    if (LINE_APPROVED.equalsIgnoreCase(st)) {
-                        approved++;
-                        approvedAmt = approvedAmt.add(amt);
-                    } else if (LINE_REJECTED.equalsIgnoreCase(st)) {
-                        rejected++;
-                        rejectedAmt = rejectedAmt.add(amt);
+                    final String newStatus;
+                    if (pending > 0) {
+                        newStatus = STATUS_SUBMITTED; // back under review
+                    } else if (approved > 0 && rejected > 0) {
+                        newStatus = STATUS_PARTIAL;
+                    } else if (approved > 0) {
+                        newStatus = STATUS_APPROVED;
+                    } else if (rejected > 0) {
+                        newStatus = STATUS_REJECTED;
+                    } else if (voided > 0) {
+                        newStatus = STATUS_VOIDED; // every receipt voided
                     } else {
-                        pending++;
+                        newStatus = STATUS_SUBMITTED;
                     }
-                }
-                final String newStatus;
-                if (pending > 0) {
-                    newStatus = STATUS_SUBMITTED;             // back under review
-                } else if (approved > 0 && rejected > 0) {
-                    newStatus = STATUS_PARTIAL;
-                } else if (approved > 0) {
-                    newStatus = STATUS_APPROVED;
-                } else if (rejected > 0) {
-                    newStatus = STATUS_REJECTED;
-                } else if (voided > 0) {
-                    newStatus = STATUS_VOIDED;                // every receipt voided
-                } else {
-                    newStatus = STATUS_SUBMITTED;
-                }
-                final BigDecimal frozenApproved = (pending > 0) ? null : approvedAmt;
-                final BigDecimal frozenRejected = rejectedAmt;
-                // A void can turn a partially-approved claim (its last rejected receipt struck
-                // off) into a wholly-approved one — notify the claimant, mirroring the admin
-                // approve path. resubmit never reaches APPROVED (a pending line forces
-                // SUBMITTED), so the new status alone is a safe transition signal here.
-                final boolean becameApproved = STATUS_APPROVED.equals(newStatus);
-                String companyId = currentUserService.getCurrentCompanyId();
-                return pool.withTransaction(tx -> headerRepo.findById(tx, headerId)
-                        .flatMap(h -> {
-                            if (h == null) return Uni.createFrom().nullItem();
-                            h.setClaimAmount(total);
-                            h.setStatus(newStatus);
-                            h.setApprovedAmount(frozenApproved);
-                            h.setRejectedAmount(frozenRejected);
-                            h.setLastEditStaff(actor);
-                            h.setLastEditDate(DateUtil.nowSGT());
-                            return headerRepo.update(tx, h);
-                        })
-                        .flatMap(saved -> (becameApproved && saved != null)
-                                ? stageClaimApprovedNotification(tx, saved, companyId).replaceWith(saved)
-                                : Uni.createFrom().item(saved)))
-                .call(saved -> (becameApproved && saved != null)
-                        ? notifyClaimApproved(saved)
-                        : Uni.createFrom().voidItem());
-            }));
+                    final BigDecimal frozenApproved = (pending > 0) ? null : approvedAmt;
+                    final BigDecimal frozenRejected = rejectedAmt;
+                    // A void can turn a partially-approved claim (its last rejected receipt struck
+                    // off) into a wholly-approved one — notify the claimant, mirroring the admin
+                    // approve path. resubmit never reaches APPROVED (a pending line forces
+                    // SUBMITTED), so the new status alone is a safe transition signal here.
+                    final boolean becameApproved = STATUS_APPROVED.equals(newStatus);
+                    String companyId = currentUserService.getCurrentCompanyId();
+                    return pool.withTransaction(tx -> headerRepo
+                                    .findById(tx, headerId)
+                                    .flatMap(h -> {
+                                        if (h == null) return Uni.createFrom().nullItem();
+                                        h.setClaimAmount(total);
+                                        h.setStatus(newStatus);
+                                        h.setApprovedAmount(frozenApproved);
+                                        h.setRejectedAmount(frozenRejected);
+                                        h.setLastEditStaff(actor);
+                                        h.setLastEditDate(DateUtil.nowSGT());
+                                        return headerRepo.update(tx, h);
+                                    })
+                                    .flatMap(saved -> (becameApproved && saved != null)
+                                            ? stageClaimApprovedNotification(tx, saved, companyId)
+                                                    .replaceWith(saved)
+                                            : Uni.createFrom().item(saved)))
+                            .call(saved -> (becameApproved && saved != null)
+                                    ? notifyClaimApproved(saved)
+                                    : Uni.createFrom().voidItem());
+                }));
     }
 
     /** Delegates the claim-approved outbox staging to {@link StaffClaimNotificationNotifier}. */
     private Uni<Void> stageClaimApprovedNotification(SqlClient tx, StaffClaim claim, String companyId) {
         return staffClaimNotificationNotifier.notifyClaimApproved(
-                new NotificationTransaction(tx, companyId), claim);
+                new NotificationTransaction(tx, resolveNotificationCompanyId(companyId)), claim);
     }
 
     /** Next numbered period under a base month, e.g. "JULY-2026" → "JULY-2026-002" given an
@@ -679,7 +752,9 @@ public class StaffClaimService {
             try {
                 int n = Integer.parseInt(p.substring(prefix.length()).trim());
                 if (n > max) max = n;
-            } catch (NumberFormatException ignored) { /* not a numeric suffix */ }
+            } catch (NumberFormatException ignored) {
+                /* not a numeric suffix */
+            }
         }
         return String.format("%s-%03d", basePeriod, max + 1);
     }
@@ -699,11 +774,15 @@ public class StaffClaimService {
     // These never fail the business action they trail: each swallows its own error.
 
     /** Writes one m07UserActionLog row (device info from the request); failures are swallowed. */
-    private Uni<Void> logAction(String staffId, String referenceNo, String action,
-                                String remarks, DeviceInfo deviceInfo) {
+    private Uni<Void> logAction(
+            String staffId, String referenceNo, String action, String remarks, DeviceInfo deviceInfo) {
         return userActionLogService.logAction(
-                currentUserService.getCurrentCompanyId(), staffId, UserActionLogService.Module.STAFF_CLAIM,
-                truncate(referenceNo, LEN_LOG_REFERENCE), action, deviceInfo,
+                currentUserService.getCurrentCompanyId(),
+                staffId,
+                UserActionLogService.Module.STAFF_CLAIM,
+                truncate(referenceNo, LEN_LOG_REFERENCE),
+                action,
+                deviceInfo,
                 truncate(remarks, LEN_LOG_REMARKS));
     }
 
@@ -714,32 +793,43 @@ public class StaffClaimService {
      */
     private Uni<Void> notifyClaimSubmitted(StaffClaimDTO claim) {
         String submitter = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
-        return systemParameterService.loadParameter(PARAM_HR_APPROVER)
-            .onFailure().recoverWithItem((String) null)
-            .flatMap(recipient -> {
-                if (recipient == null || recipient.isBlank()) {
-                    System.err.println("[Notification] " + PARAM_HR_APPROVER
-                            + " not configured — submit notification skipped for claim "
-                            + claim.getUniqId());
-                    return Uni.createFrom().voidItem();
-                }
-                // Sequential (never combined) — these reads share one reactive session.
-                return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-                    staffRepo.findNameByStaffId(pool, submitter)
-                        .onFailure().recoverWithItem((String) null)
-                        .flatMap(name -> loadBaseCurrencySafe().flatMap(baseCcy -> {
-                            String who = (name != null && !name.isBlank()) ? name : submitter;
-                            String subject = "You received staff claim submitted by " + who
-                                    + " - " + nz(claim.getClaimPeriod());
-                            String desc = "You have received a claims submitted by " + who
-                                    + " of amount " + money(baseCcy, claim.getClaimAmount())
-                                    + " for claim period " + nz(claim.getClaimPeriod())
-                                    + " submitted on " + ts(claim.getSubmittedDate()) + ".";
-                            return createNotification(NOTIF_TYPE_ADMIN, subject, desc, recipient,
-                                    submitter, refOf(claim.getUniqId()));
-                        })));
-            })
-            .onFailure().recoverWithItem((Void) null);
+        return systemParameterService
+                .loadParameter(PARAM_HR_APPROVER)
+                .onFailure()
+                .recoverWithItem((String) null)
+                .flatMap(recipient -> {
+                    if (recipient == null || recipient.isBlank()) {
+                        System.err.println("[Notification] " + PARAM_HR_APPROVER
+                                + " not configured — submit notification skipped for claim "
+                                + claim.getUniqId());
+                        return Uni.createFrom().voidItem();
+                    }
+                    // Sequential (never combined) — these reads share one reactive session.
+                    return companyPoolManager
+                            .poolFor(currentUserService.getCurrentCompanyId())
+                            .flatMap(pool -> staffRepo
+                                    .findNameByStaffId(pool, submitter)
+                                    .onFailure()
+                                    .recoverWithItem((String) null)
+                                    .flatMap(name -> loadBaseCurrencySafe().flatMap(baseCcy -> {
+                                        String who = (name != null && !name.isBlank()) ? name : submitter;
+                                        String subject = "You received staff claim submitted by " + who + " - "
+                                                + nz(claim.getClaimPeriod());
+                                        String desc = "You have received a claims submitted by " + who
+                                                + " of amount " + money(baseCcy, claim.getClaimAmount())
+                                                + " for claim period " + nz(claim.getClaimPeriod())
+                                                + " submitted on " + ts(claim.getSubmittedDate()) + ".";
+                                        return createNotification(
+                                                NOTIF_TYPE_ADMIN,
+                                                subject,
+                                                desc,
+                                                recipient,
+                                                submitter,
+                                                refOf(claim.getUniqId()));
+                                    })));
+                })
+                .onFailure()
+                .recoverWithItem((Void) null);
     }
 
     /**
@@ -748,26 +838,37 @@ public class StaffClaimService {
      */
     private Uni<Void> notifyClaimResubmitted(StaffClaimDTO claim) {
         String submitter = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
-        return systemParameterService.loadParameter(PARAM_HR_APPROVER)
-            .onFailure().recoverWithItem((String) null)
-            .flatMap(recipient -> {
-                if (recipient == null || recipient.isBlank()) {
-                    return Uni.createFrom().voidItem();
-                }
-                return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-                    staffRepo.findNameByStaffId(pool, submitter)
-                        .onFailure().recoverWithItem((String) null)
-                        .flatMap(name -> {
-                            String who = (name != null && !name.isBlank()) ? name : submitter;
-                            String subject = "Receipt resubmitted for review by " + who
-                                    + " - " + nz(claim.getClaimPeriod());
-                            String desc = who + " has resubmitted a receipt for claim period "
-                                    + nz(claim.getClaimPeriod()) + " for your review.";
-                            return createNotification(NOTIF_TYPE_ADMIN, subject, desc, recipient,
-                                    submitter, refOf(claim.getUniqId()));
-                        }));
-            })
-            .onFailure().recoverWithItem((Void) null);
+        return systemParameterService
+                .loadParameter(PARAM_HR_APPROVER)
+                .onFailure()
+                .recoverWithItem((String) null)
+                .flatMap(recipient -> {
+                    if (recipient == null || recipient.isBlank()) {
+                        return Uni.createFrom().voidItem();
+                    }
+                    return companyPoolManager
+                            .poolFor(currentUserService.getCurrentCompanyId())
+                            .flatMap(pool -> staffRepo
+                                    .findNameByStaffId(pool, submitter)
+                                    .onFailure()
+                                    .recoverWithItem((String) null)
+                                    .flatMap(name -> {
+                                        String who = (name != null && !name.isBlank()) ? name : submitter;
+                                        String subject = "Receipt resubmitted for review by " + who + " - "
+                                                + nz(claim.getClaimPeriod());
+                                        String desc = who + " has resubmitted a receipt for claim period "
+                                                + nz(claim.getClaimPeriod()) + " for your review.";
+                                        return createNotification(
+                                                NOTIF_TYPE_ADMIN,
+                                                subject,
+                                                desc,
+                                                recipient,
+                                                submitter,
+                                                refOf(claim.getUniqId()));
+                                    }));
+                })
+                .onFailure()
+                .recoverWithItem((Void) null);
     }
 
     /** Notifies the claimant that their claim is wholly approved. */
@@ -776,25 +877,37 @@ public class StaffClaimService {
         if (claimant == null || claimant.isBlank()) {
             return Uni.createFrom().voidItem();
         }
-        return loadBaseCurrencySafe().flatMap(baseCcy -> {
-            String subject = "Your " + nz(claim.getClaimPeriod()) + " claim is approved.";
-            String desc = "Your claim for " + nz(claim.getClaimPeriod())
-                    + " of amount " + money(baseCcy, claim.getClaimAmount())
-                    + " submitted on " + ts(claim.getSubmittedDate()) + " is being approved.";
-            return createNotification(NOTIF_TYPE, subject, desc, claimant, claimant,
-                    refOf(claim.getUniqId()));
-        })
-        .onFailure().recoverWithItem((Void) null);
+        return loadBaseCurrencySafe()
+                .flatMap(baseCcy -> {
+                    String subject = "Your " + nz(claim.getClaimPeriod()) + " claim is approved.";
+                    String desc = "Your claim for " + nz(claim.getClaimPeriod())
+                            + " of amount " + money(baseCcy, claim.getClaimAmount())
+                            + " submitted on " + ts(claim.getSubmittedDate()) + " is being approved.";
+                    return createNotification(NOTIF_TYPE, subject, desc, claimant, claimant, refOf(claim.getUniqId()));
+                })
+                .onFailure()
+                .recoverWithItem((Void) null);
     }
 
-    private Uni<Void> createNotification(String notificationType, String subject, String desc,
-                                         String notifyStaff, String entryStaff, String referenceNo) {
-        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId()).flatMap(pool ->
-                pool.withTransaction(tx ->
-                    notificationRepo.create(tx, MODULE_ID, notificationType,
-                            truncate(subject, LEN_NOTIF_SUBJECT), truncate(desc, LEN_NOTIF_DESC),
-                            notifyStaff, entryStaff, referenceNo)))
-            .replaceWithVoid();
+    private Uni<Void> createNotification(
+            String notificationType,
+            String subject,
+            String desc,
+            String notifyStaff,
+            String entryStaff,
+            String referenceNo) {
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> pool.withTransaction(tx -> notificationRepo.create(
+                        tx,
+                        MODULE_ID,
+                        notificationType,
+                        truncate(subject, LEN_NOTIF_SUBJECT),
+                        truncate(desc, LEN_NOTIF_DESC),
+                        notifyStaff,
+                        entryStaff,
+                        referenceNo)))
+                .replaceWithVoid();
     }
 
     /** The claim's header id as text, for the notification reference (deep-link target). */
@@ -813,7 +926,9 @@ public class StaffClaimService {
 
     /** Plain 2-dp amount, no currency (used in audit remarks). */
     private static String plain(BigDecimal amount) {
-        return amount == null ? "0.00" : amount.setScale(2, RoundingMode.HALF_UP).toPlainString();
+        return amount == null
+                ? "0.00"
+                : amount.setScale(2, RoundingMode.HALF_UP).toPlainString();
     }
 
     /** "{CCY} {amount}" for notification text; drops the code if base currency is unknown. */
@@ -848,5 +963,10 @@ public class StaffClaimService {
         dto.setLines(lines);
         dto.setLineCount(lines != null ? lines.size() : null);
         return dto;
+    }
+
+    /** Uses the request company identifier or the datasource-derived main fallback. */
+    private String resolveNotificationCompanyId(String companyId) {
+        return companyId == null || companyId.isBlank() ? defaultCompanyId : companyId;
     }
 }
