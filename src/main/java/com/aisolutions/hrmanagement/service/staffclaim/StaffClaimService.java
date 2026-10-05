@@ -293,13 +293,19 @@ public class StaffClaimService {
     }
 
     /**
-     * Deletes every receipt attachment linked to a claim line — both the FTP file and
-     * the m10Attachments row — via {@link AttachmentService#deleteAttachment}. No-op when
-     * the line has no receipt. Attachments are keyed by moduleType="CLAIM", referenceCode=lineId.
+     * Deletes every attachment linked to a claim line (receipt photo and supporting
+     * documents) — both the FTP file and the m10Attachments row — via
+     * {@link AttachmentService#deleteAttachment}. No-op when the line has none.
+     * Keyed by moduleType ("CLAIM" / "CLAIM_SUPPORT"), referenceCode=lineId.
      */
     private Uni<Void> deleteLineAttachments(Long lineId) {
+        return deleteAttachmentsOfModule(StaffClaimDetailService.MODULE_TYPE, lineId)
+                .flatMap(v -> deleteAttachmentsOfModule(StaffClaimDetailService.SUPPORT_MODULE_TYPE, lineId));
+    }
+
+    private Uni<Void> deleteAttachmentsOfModule(String moduleType, Long lineId) {
         return attachmentService
-                .getAttachments(StaffClaimDetailService.MODULE_TYPE, String.valueOf(lineId))
+                .getAttachments(moduleType, String.valueOf(lineId))
                 .flatMap(atts -> {
                     Uni<Void> chain = Uni.createFrom().voidItem();
                     if (atts == null || atts.isEmpty()) {
@@ -575,7 +581,7 @@ public class StaffClaimService {
 
     /**
      * Staff fixes a rejected receipt (details + amount + optional new photo) and resubmits
-     * it (→ PENDING). Project, Claim Type, Description and Claim Date are locked.
+     * it (→ PENDING). Project, Claim Type and Claim Date are locked; Purpose / Remarks is editable.
      */
     public Uni<StaffClaimDTO> editRejectedLine(
             Long headerId,

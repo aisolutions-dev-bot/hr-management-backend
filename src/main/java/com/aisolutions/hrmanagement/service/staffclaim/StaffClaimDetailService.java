@@ -40,6 +40,9 @@ public class StaffClaimDetailService {
 
     public static final String MODULE_TYPE = "CLAIM";
 
+    /** Staff-uploaded supporting documents (images / PDF) for a receipt; referenceCode = line id. */
+    public static final String SUPPORT_MODULE_TYPE = "CLAIM_SUPPORT";
+
     // m18StaffClaimsDet column lengths — truncate inputs to match DDL
     private static final int LEN_STAFF_ID = 25;
     private static final int LEN_PROJECT_ID = 25;
@@ -134,12 +137,13 @@ public class StaffClaimDetailService {
 
     /**
      * Overwrites the editable fields of a rejected-receipt fix and the re-converted amount.
-     * Locked (kept from the original): Project, Claim Type, Description, Claim Date.
+     * Locked (kept from the original): Project, Claim Type, Claim Date. Purpose / Remarks is editable.
      */
     public void applyEditedFields(StaffClaimDetail e, StaffClaimDetailDTO dto,
                                   CurrencyService.Converted conv) {
         BigDecimal originalAmount = dto.getReceiptAmount() != null
                 ? dto.getReceiptAmount() : dto.getClaimAmount();
+        e.setClaimDescription(StringNormalizer.truncate(dto.getClaimDescription(), LEN_DESCRIPTION));
         e.setMerchantName(StringNormalizer.truncate(dto.getMerchantName(), LEN_MERCHANT_NAME));
         e.setReceiptNumber(StringNormalizer.truncate(dto.getReceiptNumber(), LEN_RECEIPT_NUMBER));
         e.setReceiptDate(dto.getReceiptDate());
