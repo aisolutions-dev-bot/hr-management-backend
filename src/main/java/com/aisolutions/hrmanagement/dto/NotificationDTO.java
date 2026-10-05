@@ -1,15 +1,16 @@
 package com.aisolutions.hrmanagement.dto;
 
-import com.aisolutions.hrmanagement.entity.Notification;
-
 import java.time.LocalDateTime;
 
+import com.aisolutions.hrmanagement.entity.Notification;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
 /** Read model for the notification bell. */
 @Data
 @NoArgsConstructor
+@RegisterForReflection
 public class NotificationDTO {
     private Long id;
     private String moduleId;

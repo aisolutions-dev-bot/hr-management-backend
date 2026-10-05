@@ -1,15 +1,17 @@
 package com.aisolutions.hrmanagement.dto;
 
+import java.util.List;
+
+import io.quarkus.runtime.annotations.RegisterForReflection;
+import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import lombok.AllArgsConstructor;
-
-import java.util.List;
 
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
+@RegisterForReflection
 public class DropdownResponseDTO {
 
-    private List<DropdownOptionDTO> projects;    
+    private List<DropdownOptionDTO> projects;
 }

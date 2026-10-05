@@ -1,10 +1,11 @@
 package com.aisolutions.hrmanagement.dto;
 
+import java.util.List;
+
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-
-import java.util.List;
 
 /**
  * The approval flow shown to the applicant on the apply form. When {@code active}
@@ -14,15 +15,17 @@ import java.util.List;
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
+@RegisterForReflection
 public class ApprovalFlowDTO {
     private boolean active;
-    private String mode;            // SEQUENTIAL | PARALLEL | null
-    private List<Tier> tiers;       // ordered ON tiers (empty when inactive)
+    private String mode; // SEQUENTIAL | PARALLEL | null
+    private List<Tier> tiers; // ordered ON tiers (empty when inactive)
 
     /** One tier of the chain: its level and approver. */
     @Data
     @NoArgsConstructor
     @AllArgsConstructor
+    @RegisterForReflection
     public static class Tier {
         private int level;
         private String approverStaffId;

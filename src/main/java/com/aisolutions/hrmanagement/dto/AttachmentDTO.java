@@ -2,6 +2,7 @@ package com.aisolutions.hrmanagement.dto;
 
 import java.time.LocalDateTime;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -9,6 +10,7 @@ import lombok.NoArgsConstructor;
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
+@RegisterForReflection
 public class AttachmentDTO {
 
     private Long uniqId;

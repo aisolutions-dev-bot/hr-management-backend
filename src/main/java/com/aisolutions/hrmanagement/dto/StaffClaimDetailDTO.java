@@ -1,15 +1,17 @@
 package com.aisolutions.hrmanagement.dto;
 
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
-import java.math.BigDecimal;
-import java.time.LocalDateTime;
-
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
+@RegisterForReflection
 public class StaffClaimDetailDTO {
 
     private Long uniqId;
@@ -33,6 +35,7 @@ public class StaffClaimDetailDTO {
     private String currency;
     /** Currency the AI/OCR read off the receipt (traceability). */
     private String detectedCurrency;
+
     private BigDecimal exchangeRate;
 
     // Itemised approval (per-line)

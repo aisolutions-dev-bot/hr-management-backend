@@ -1,11 +1,12 @@
 package com.aisolutions.hrmanagement.dto;
 
-import lombok.Data;
-import lombok.NoArgsConstructor;
-
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+
+import io.quarkus.runtime.annotations.RegisterForReflection;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 
 /**
  * Transport for a leave application across all four wizard steps and the list/detail views.
@@ -13,6 +14,7 @@ import java.time.LocalDateTime;
  */
 @Data
 @NoArgsConstructor
+@RegisterForReflection
 public class LeaveApplicationDTO {
 
     private Long uniqId;
@@ -24,8 +26,8 @@ public class LeaveApplicationDTO {
     private LocalDateTime applicationDate;
 
     // Step 2
-    private String leaveAction;   // APPLY | CANCEL
-    private String leaveType;     // m01LeaveType code
+    private String leaveAction; // APPLY | CANCEL
+    private String leaveType; // m01LeaveType code
     private String leaveTypeDescription; // resolved on read for display
     private String remarks;
 
@@ -49,12 +51,12 @@ public class LeaveApplicationDTO {
 
     // Step 4
     private String approverStaffId;
-    private String approverName;  // resolved on read for display
+    private String approverName; // resolved on read for display
 
     // Lifecycle
     private String status;
-    private String approvedBy;      // decider's staff id
-    private String approvedByName;  // resolved on read for display
+    private String approvedBy; // decider's staff id
+    private String approvedByName; // resolved on read for display
     private LocalDateTime approvedDate;
     private String rejectReason;
 

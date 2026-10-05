@@ -1,10 +1,11 @@
 package com.aisolutions.hrmanagement.dto;
 
+import java.math.BigDecimal;
+
+import io.quarkus.runtime.annotations.RegisterForReflection;
+import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import lombok.AllArgsConstructor;
-
-import java.math.BigDecimal;
 
 /**
  * Result returned from the OpenAI receipt OCR endpoint.
@@ -13,6 +14,7 @@ import java.math.BigDecimal;
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
+@RegisterForReflection
 public class OcrReceiptResultDTO {
 
     /** Merchant / vendor name (e.g. "Green on Earth", "McDonald's") */

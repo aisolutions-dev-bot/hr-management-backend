@@ -1,9 +1,10 @@
 package com.aisolutions.hrmanagement.dto;
 
+import java.math.BigDecimal;
+
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-
-import java.math.BigDecimal;
 
 /**
  * Apply-form preview of how a leave application would be funded.
@@ -12,18 +13,19 @@ import java.math.BigDecimal;
  */
 @Data
 @NoArgsConstructor
+@RegisterForReflection
 public class LeaveOverflowPreviewDTO {
 
     private String leaveType;
     private BigDecimal totalDays;
-    private BigDecimal remainingDays;   // paid balance before this application (may be negative)
+    private BigDecimal remainingDays; // paid balance before this application (may be negative)
 
     private BigDecimal paidDays;
     private BigDecimal advanceDays;
     private BigDecimal unpaidDays;
 
-    private boolean allowAdvance;       // whether the company permits advanced leave
-    private BigDecimal advanceMaxDays;  // the advance ceiling in effect
+    private boolean allowAdvance; // whether the company permits advanced leave
+    private BigDecimal advanceMaxDays; // the advance ceiling in effect
 
     /** True when any day is not covered by the paid balance (advance or unpaid > 0). */
     private boolean hasOverflow;

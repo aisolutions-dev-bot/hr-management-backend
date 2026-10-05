@@ -3,6 +3,8 @@ package com.aisolutions.hrmanagement.dto;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 /**
  * One raw m18StaffLeaveLedger row, as the balance calculator needs it.
  *
@@ -10,6 +12,7 @@ import java.time.LocalDate;
  * effective date and an optional {@code expiryDate}); TAKEN / ADJUSTMENT rows are
  * consumption movements ({@code days} signed, {@code txnDate} = the leave's From date).
  */
+@RegisterForReflection
 public record LeaveLedgerRow(
         String leaveType,
         String txnType,
@@ -18,5 +21,4 @@ public record LeaveLedgerRow(
         BigDecimal days,
         LocalDate expiryDate,
         Integer serviceYears,
-        String sourceRefId) {
-}
+        String sourceRefId) {}

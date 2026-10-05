@@ -1,14 +1,16 @@
 package com.aisolutions.hrmanagement.dto;
 
+import java.time.LocalDateTime;
+
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
-import java.time.LocalDateTime;
-
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
+@RegisterForReflection
 public class OcrMerchantAliasDTO {
     private Long uniqId;
     private String ocrPattern;
