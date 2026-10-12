@@ -51,7 +51,9 @@ public final class LeaveEntitlementCalculator {
     /** Company-level leave policy (the {@code m01LeavePolicy} row). */
     public record Policy(String leaveYearBasis, String allocationType, int eligibilityMonths, String roundingMode) {
         public static Policy defaults() {
-            return new Policy(BASIS_CALENDAR, ALLOC_ACCRUED, 3, ROUND_NEAREST);
+            // Default model: full annual entitlement up front for everyone, pro-rated only for mid-year
+            // joiners and resigners. A tenant can switch to ACCRUED via m01LeavePolicy / the Leave Policy screen.
+            return new Policy(BASIS_CALENDAR, ALLOC_FORWARD_CREDIT, 3, ROUND_NEAREST);
         }
     }
 
@@ -70,15 +72,39 @@ public final class LeaveEntitlementCalculator {
      */
     public static Suggestion compute(String method, List<LeaveTypeEntitlement> rows,
                                      LocalDate joinDate, int leaveYear, LocalDate today, Policy policy) {
+        return compute(method, rows, joinDate, leaveYear, today, null, policy);
+    }
+
+    /**
+     * As {@link #compute(String, List, LocalDate, int, LocalDate, Policy)}, but also caps the
+     * accrual at a staff's last working day (resignation/termination). Service earned beyond the
+     * day they leave is not credited — the leaving-side mirror of pro-rating a mid-year joiner.
+     *
+     * @param lastWorkingDay the staff's last working day (m03Staff.DateLeft), or null while active
+     */
+    public static Suggestion compute(String method, List<LeaveTypeEntitlement> rows,
+                                     LocalDate joinDate, int leaveYear, LocalDate today,
+                                     LocalDate lastWorkingDay, Policy policy) {
         Policy p = policy != null ? policy : Policy.defaults();
         String m = method != null ? method : METHOD_NONE;
         if (METHOD_LINEAR.equals(m)) {
-            return linear(rows, joinDate, leaveYear, today, p);
+            return linear(rows, joinDate, leaveYear, today, lastWorkingDay, p);
         }
         if (METHOD_STEP.equals(m)) {
-            return step(rows, joinDate, leaveYear, today, p);
+            return step(rows, joinDate, leaveYear, today, lastWorkingDay, p);
         }
-        return none(rows, joinDate, today);
+        return none(rows, joinDate, today, lastWorkingDay);
+    }
+
+    /**
+     * The count never runs past a leaver's last working day: {@code DateLeft} is the last day
+     * worked (inclusive), so the exclusive reference is the day after. Null (active staff) leaves
+     * the count-to point untouched.
+     */
+    private static LocalDate capAtLastDay(LocalDate countTo, LocalDate lastWorkingDay) {
+        if (lastWorkingDay == null) return countTo;
+        LocalDate leftExclusive = lastWorkingDay.plusDays(1);
+        return leftExclusive.isBefore(countTo) ? leftExclusive : countTo;
     }
 
     /**
@@ -93,7 +119,7 @@ public final class LeaveEntitlementCalculator {
      * </ul>
      */
     private static Suggestion linear(List<LeaveTypeEntitlement> rows, LocalDate join, int leaveYear,
-                                     LocalDate today, Policy p) {
+                                     LocalDate today, LocalDate lastWorkingDay, Policy p) {
         if (join == null) {
             return new Suggestion(null, null, false, null);
         }
@@ -105,6 +131,8 @@ public final class LeaveEntitlementCalculator {
         LocalDate countTo = ALLOC_ACCRUED.equals(p.allocationType()) && today != null && today.isBefore(yearEndExclusive)
                 ? today
                 : yearEndExclusive;
+        // A leaver stops accruing on their last working day, whichever comes first.
+        countTo = capAtLastDay(countTo, lastWorkingDay);
 
         int totalServiceMonths = completedMonths(join, countTo);
         int years = totalServiceMonths / 12;
@@ -135,7 +163,7 @@ public final class LeaveEntitlementCalculator {
      * as of today (the step earned so far), FORWARD_CREDIT the months completed by 31 Dec.
      */
     private static Suggestion step(List<LeaveTypeEntitlement> rows, LocalDate join, int leaveYear,
-                                   LocalDate today, Policy p) {
+                                   LocalDate today, LocalDate lastWorkingDay, Policy p) {
         if (join == null) {
             return new Suggestion(null, null, false, null);
         }
@@ -144,6 +172,8 @@ public final class LeaveEntitlementCalculator {
         LocalDate countTo = ALLOC_ACCRUED.equals(p.allocationType()) && today != null && today.isBefore(yearEndExclusive)
                 ? today
                 : yearEndExclusive;
+        // A leaver stops accruing on their last working day, whichever comes first.
+        countTo = capAtLastDay(countTo, lastWorkingDay);
         int totalServiceMonths = completedMonths(join, countTo);
         int years = totalServiceMonths / 12;
         int days = bandFor(monthRows, totalServiceMonths);
@@ -153,12 +183,15 @@ public final class LeaveEntitlementCalculator {
         return new Suggestion(BigDecimal.valueOf(days).setScale(1), years, true, note);
     }
 
-    /** Plain service-year band as of today — the pre-pro-ration behaviour, unchanged. */
-    private static Suggestion none(List<LeaveTypeEntitlement> rows, LocalDate join, LocalDate today) {
+    /** Plain service-year band as of today — the pre-pro-ration behaviour, unchanged for active staff. */
+    private static Suggestion none(List<LeaveTypeEntitlement> rows, LocalDate join, LocalDate today,
+                                   LocalDate lastWorkingDay) {
         if (join == null) {
             return new Suggestion(null, null, false, null);
         }
-        int years = join.isAfter(today) ? 0 : (int) ChronoUnit.YEARS.between(join, today);
+        // Years of service count only to the last working day for a leaver.
+        LocalDate asOf = (lastWorkingDay != null && lastWorkingDay.isBefore(today)) ? lastWorkingDay : today;
+        int years = join.isAfter(asOf) ? 0 : (int) ChronoUnit.YEARS.between(join, asOf);
         int band = bandFor(unit(rows, UNIT_YEAR), years);
         return new Suggestion(BigDecimal.valueOf(band).setScale(1), years, true, null);
     }

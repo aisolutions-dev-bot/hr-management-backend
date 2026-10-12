@@ -58,4 +58,11 @@ public class Staff {
     /** Employment status: 'O' active, 'T' terminated. */
     @Column(name = "Status", length = 1)
     private String status;
+
+    /**
+     * Last working day for a resigned/terminated staff ('R'/'T'); null while active.
+     * Leave entitlement stops accruing after this date (pro-rated, mirroring a mid-year joiner).
+     */
+    @Column(name = "DateLeft")
+    private LocalDateTime dateLeft;
 }

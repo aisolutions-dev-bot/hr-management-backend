@@ -1,6 +1,7 @@
 package com.aisolutions.hrmanagement.service.leave;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -214,7 +215,9 @@ public class LeaveService {
         dto.setAdvanceTakenDays(nz(res.advanceTaken()));
         // The ledger's assigned entitlement (GRANT buckets) wins over the ladder when present.
         if (res.hasGrant()) {
-            applyLedgerBalance(dto, res, pending);
+            applyLedgerBalance(dto, res, pending,
+                    earnedEntitlement(res, policy, joinDate(staff), lastWorkingDay(staff), year, today),
+                    availableToTake(res, policy, joinDate(staff), lastWorkingDay(staff), year, today));
             return dto;
         }
         // On-request type with no HR-assigned record: not auto-entitled from the ladder.
@@ -231,7 +234,7 @@ public class LeaveService {
         // Pre-assignment estimate: pro-ration-aware so it matches the grant HR later assigns
         // (MONTH-unit step bands like MC are read as service months, not years).
         LeaveEntitlementCalculator.Suggestion sug =
-                LeaveEntitlementCalculator.compute(method, bands, joinDate(staff), year, today, policy);
+                LeaveEntitlementCalculator.compute(method, bands, joinDate(staff), year, today, lastWorkingDay(staff), policy);
         if (!sug.entitlementKnown()) {
             dto.setEntitlementKnown(false);
             dto.setServiceYears(null);
@@ -338,6 +341,7 @@ public class LeaveService {
             rowsByType.computeIfAbsent(r.leaveType(), k -> new ArrayList<>()).add(r);
         }
         LocalDate joinDate = joinDate(staff);
+        LocalDate lastDay = lastWorkingDay(staff);
         List<LeaveBalanceDTO> out = new ArrayList<>();
         for (DropdownOptionDTO type : types) {
             String code = type.getValue();
@@ -353,6 +357,7 @@ public class LeaveService {
                     type.getLabel(),
                     hasBands ? bands : List.of(),
                     joinDate,
+                    lastDay,
                     year,
                     today,
                     res,
@@ -368,6 +373,7 @@ public class LeaveService {
             String description,
             List<LeaveTypeEntitlement> bands,
             LocalDate joinDate,
+            LocalDate lastWorkingDay,
             int year,
             LocalDate today,
             LeaveBalanceCalculator.Result res,
@@ -386,14 +392,16 @@ public class LeaveService {
         dto.setAdvanceTakenDays(nz(res.advanceTaken()));
         // The ledger's assigned entitlement (GRANT buckets) wins over the ladder when present.
         if (res.hasGrant()) {
-            applyLedgerBalance(dto, res, pending);
+            applyLedgerBalance(dto, res, pending,
+                    earnedEntitlement(res, policy, joinDate, lastWorkingDay, year, today),
+                    availableToTake(res, policy, joinDate, lastWorkingDay, year, today));
             return dto;
         }
         dto.setEntitlementSource("LADDER");
         // Pre-assignment estimate: pro-ration-aware so it matches the grant HR later assigns
         // (MONTH-unit step bands like MC are read as service months, not years).
         LeaveEntitlementCalculator.Suggestion sug =
-                LeaveEntitlementCalculator.compute(method, bands, joinDate, year, today, policy);
+                LeaveEntitlementCalculator.compute(method, bands, joinDate, year, today, lastWorkingDay, policy);
         if (!sug.entitlementKnown()) {
             dto.setEntitlementKnown(false);
             dto.setServiceYears(null);
@@ -419,17 +427,58 @@ public class LeaveService {
      * authoritative and overrides the ladder, so it also clears the "no join date — not verified"
      * state for manual-entry staff.
      */
-    private static void applyLedgerBalance(LeaveBalanceDTO dto, LeaveBalanceCalculator.Result res, BigDecimal pending) {
+    private static void applyLedgerBalance(LeaveBalanceDTO dto, LeaveBalanceCalculator.Result res,
+                                           BigDecimal pending, BigDecimal entitledToDate,
+                                           BigDecimal availableToTake) {
         dto.setEntitlementKnown(true);
         dto.setServiceYears(res.serviceYears()); // snapshot from the year's grant; may be null
-        dto.setEntitledDays(nz(res.entitled()));
+        dto.setEntitledDays(nz(entitledToDate));
         dto.setBroughtForwardDays(nz(res.broughtForward()));
-        dto.setRemainingDays(nz(res.available()).subtract(pending));
+        dto.setRemainingDays(nz(availableToTake).subtract(pending));
         dto.setExpiringDays(nz(res.expiring()));
         dto.setExpiryDate(res.nextExpiry());
         dto.setLapsedDays(nz(res.lapsed()));
         dto.setEntitlementSource("ASSIGNED");
         dto.setMessage(null);
+    }
+
+    /**
+     * The entitlement a GRANT-backed staff sees: under ACCRUED it is what they have earned so far this year
+     * (the grant pro-rated by completed months), not the full-year grant — so the screen reads as one
+     * consistent earned-to-date figure. FORWARD_CREDIT (or no join date) shows the full grant.
+     */
+    private static BigDecimal earnedEntitlement(LeaveBalanceCalculator.Result res, Policy policy,
+            LocalDate join, LocalDate lastWorkingDay, int year, LocalDate today) {
+        BigDecimal grant = nz(res.entitled());
+        if (policy == null || !LeaveEntitlementCalculator.ALLOC_ACCRUED.equals(policy.allocationType())
+                || join == null || grant.signum() <= 0) {
+            return grant;
+        }
+        LocalDate yearStart = LocalDate.of(year, 1, 1);
+        LocalDate yearEndExcl = LocalDate.of(year + 1, 1, 1);
+        LocalDate countTo = (today != null && today.isBefore(yearEndExcl)) ? today : yearEndExcl;
+        // A leaver stops accruing on their last working day.
+        if (lastWorkingDay != null && lastWorkingDay.plusDays(1).isBefore(countTo)) {
+            countTo = lastWorkingDay.plusDays(1);
+        }
+        LocalDate from = join.isAfter(yearStart) ? join : yearStart;
+        int monthsInYear = Math.max(0, Math.min(12, LeaveEntitlementCalculator.completedMonths(from, countTo)));
+        // Whole days, matching the NEAREST-rounded entitlement figure the calculator produces.
+        return grant.multiply(BigDecimal.valueOf(monthsInYear))
+                .divide(BigDecimal.valueOf(12), 0, RoundingMode.HALF_UP).setScale(1);
+    }
+
+    /**
+     * Paid days a GRANT-backed staff may take now. FORWARD_CREDIT (or no join date) = full ledger
+     * availability; ACCRUED caps it at brought-forward plus this year's grant pro-rated by completed
+     * months, so the unearned slice falls to the advance/unpaid split. Driven by AllocationType.
+     */
+    private static BigDecimal availableToTake(LeaveBalanceCalculator.Result res, Policy policy,
+            LocalDate join, LocalDate lastWorkingDay, int year, LocalDate today) {
+        BigDecimal grant = nz(res.entitled());
+        BigDecimal unearned = grant.subtract(earnedEntitlement(res, policy, join, lastWorkingDay, year, today))
+                .max(BigDecimal.ZERO);
+        return nz(res.available()).subtract(unearned);
     }
 
     private static BigDecimal nz(BigDecimal v) {
@@ -906,6 +955,11 @@ public class LeaveService {
         return (staff != null && staff.getDateJoin() != null)
                 ? staff.getDateJoin().toLocalDate()
                 : null;
+    }
+
+    /** The staff's last working day (resignation/termination), or null while active. */
+    private static LocalDate lastWorkingDay(Staff staff) {
+        return (staff != null && staff.getDateLeft() != null) ? staff.getDateLeft().toLocalDate() : null;
     }
 
     private Uni<Void> logSubmit(LeaveApplication e, DeviceInfo deviceInfo) {
