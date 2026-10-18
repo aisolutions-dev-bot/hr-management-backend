@@ -102,6 +102,30 @@ public class ApprovalFlowRepository {
             .onFailure().recoverWithItem(new Snapshot(null, List.of()));
     }
 
+    /** Logs one flow action (here only the RESUME marker). Runs on the caller's transaction connection. */
+    public Uni<Void> insertAction(SqlClient client, String moduleId, String screenType, long referenceId,
+                                  Integer approvalLevel, String action, String reason,
+                                  String actionStaff, LocalDateTime actionDate) {
+        return client.preparedQuery(
+                "INSERT INTO m07ApprovalAction " +
+                "(ModuleId, ScreenType, ReferenceID, ApprovalLevel, Action, Reason, ActionStaff, ActionDate, " +
+                "EntryStaff, EntryDate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .execute(Tuple.tuple()
+                .addValue(moduleId)
+                .addValue(screenType)
+                .addValue(referenceId)
+                .addValue(approvalLevel)
+                .addValue(action)
+                .addValue(reason)
+                .addValue(actionStaff)
+                .addValue(actionDate)
+                .addValue(actionStaff)
+                .addValue(actionDate))
+            .replaceWithVoid()
+            .onFailure().invoke(e -> log.error("Error logging approval action for {} {}/{}: {}",
+                    referenceId, moduleId, screenType, e.getMessage(), e));
+    }
+
     /** Writes the snapshot rows (one per tier) for a document at submit. Runs on the tx connection. */
     public Uni<Void> insertSnapshot(SqlClient client, String moduleId, String screenType, long referenceId,
                                     String mode, List<Tier> tiers, String actor, LocalDateTime now) {

@@ -93,6 +93,16 @@ public class StaffClaimResource {
         return access.gate(CODE, () -> claimService.claimantOptions().map(list -> Response.ok(list).build()));
     }
 
+    // ── APPROVAL TRAIL (applicant view) ──
+    @GET
+    @Path("/{id}/approval-trail")
+    public Uni<Response> approvalTrail(@PathParam("id") Long id) {
+        return access.gate(CODE, () -> claimService.getApprovalTrail(id)
+                .map(trail -> trail == null
+                        ? Response.status(Response.Status.NOT_FOUND).build()
+                        : Response.ok(trail).build()));
+    }
+
     // ── GET ONE (with lines) ──
     @GET
     @Path("/{id}")

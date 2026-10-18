@@ -26,6 +26,7 @@ import com.aisolutions.hrmanagement.repository.StaffRepository;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
 import com.aisolutions.hrmanagement.service.DocNoSeqService;
 import com.aisolutions.hrmanagement.service.SystemParameterService;
+import com.aisolutions.hrmanagement.service.approval.ClaimApprovalFlowService;
 import com.aisolutions.hrmanagement.service.attachment.AttachmentService;
 import com.aisolutions.hrmanagement.service.notification.StaffClaimNotificationNotifier;
 import com.aisolutions.hrmanagement.service.useractionlog.UserActionLogService;
@@ -137,6 +138,9 @@ public class StaffClaimService {
     @Inject
     DocNoSeqService docNoSeqService;
 
+    @Inject
+    com.aisolutions.hrmanagement.service.approval.ClaimApprovalFlowService claimApprovalFlowService;
+
     // ─────────────────────────────────────────────────────────
     //  CREATE DRAFT
     // ─────────────────────────────────────────────────────────
@@ -245,6 +249,15 @@ public class StaffClaimService {
         return companyPoolManager
                 .poolFor(currentUserService.getCurrentCompanyId())
                 .flatMap(pool -> staffRepo.findClaimantOptions(pool));
+    }
+
+    /** The approval trail for a claim (applicant view), read from the frozen flow snapshot + action log. */
+    public Uni<com.aisolutions.hrmanagement.dto.ApprovalTrailDTO> getApprovalTrail(Long headerId) {
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> headerRepo.findById(pool, headerId).flatMap(h -> h == null
+                        ? Uni.createFrom().nullItem()
+                        : claimApprovalFlowService.buildTrail(pool, headerId, h.getStatus())));
     }
 
     /** One claim with all its line items populated. */
@@ -408,9 +421,10 @@ public class StaffClaimService {
                     LocalDateTime now = DateUtil.nowSGT();
                     String companyId = currentUserService.getCurrentCompanyId();
                     return pool.withTransaction(tx -> applySubmitTransition(tx, headerId, total, now)
-                                    .flatMap(saved -> stageClaimSubmittedNotification(
-                                                    tx, toHeaderDto(saved, null), "submitted", companyId)
-                                            .replaceWith(toHeaderDto(saved, null))))
+                                    .flatMap(saved -> snapshotClaimFlow(tx, saved, now)
+                                            .flatMap(v -> stageClaimSubmittedNotification(
+                                                            tx, toHeaderDto(saved, null), "submitted", companyId)
+                                                    .replaceWith(toHeaderDto(saved, null)))))
                             .call(dto -> logAction(
                                     dto.getEntryStaff(),
                                     dto.getClaimPeriod(),
@@ -420,6 +434,16 @@ public class StaffClaimService {
                                     deviceInfo))
                             .call(this::notifyClaimSubmitted);
                 }));
+    }
+
+    /** Freezes the claim approval flow onto the submitted claim, resolving tiers for the submitter's department. */
+    private Uni<Void> snapshotClaimFlow(SqlClient tx, StaffClaim saved, LocalDateTime now) {
+        return staffRepo.findByStaffId(tx, saved.getStaffId())
+                .onFailure().recoverWithItem((com.aisolutions.hrmanagement.entity.Staff) null)
+                .flatMap(staff -> claimApprovalFlowService.snapshotAtSubmit(tx,
+                        new com.aisolutions.hrmanagement.service.approval.ClaimApprovalFlowService.SubmitContext(
+                                saved.getUniqId(), staff != null ? staff.getDepartment() : null,
+                                saved.getStaffId(), now)));
     }
 
     /** Validates the draft header, applies the numbered period and persists the SUBMITTED state. */
@@ -736,7 +760,10 @@ public class StaffClaimService {
     private Uni<StaffClaim> recalcAndRollup(Long headerId, String actor) {
         return companyPoolManager
                 .poolFor(currentUserService.getCurrentCompanyId())
-                .flatMap(pool -> detailRepo.findByHeaderId(pool, headerId).flatMap(lines -> {
+                .flatMap(pool -> detailRepo.findByHeaderId(pool, headerId).flatMap(lines ->
+                        claimApprovalFlowService.resolve(pool, headerId).flatMap(flow -> {
+                    // An unfinished approval flow keeps the claim in review, however the receipts are decided.
+                    final boolean holdInReview = flow.active() && !ClaimApprovalFlowService.isFlowComplete(flow);
                     BigDecimal total = sumClaimAmount(lines); // voided receipts excluded
                     int approved = 0, rejected = 0, pending = 0, voided = 0;
                     BigDecimal approvedAmt = BigDecimal.ZERO;
@@ -761,7 +788,7 @@ public class StaffClaimService {
                         }
                     }
                     final String newStatus;
-                    if (pending > 0) {
+                    if (pending > 0 || holdInReview) {
                         newStatus = STATUS_SUBMITTED; // back under review
                     } else if (approved > 0 && rejected > 0) {
                         newStatus = STATUS_PARTIAL;
@@ -774,8 +801,9 @@ public class StaffClaimService {
                     } else {
                         newStatus = STATUS_SUBMITTED;
                     }
-                    final BigDecimal frozenApproved = (pending > 0) ? null : approvedAmt;
+                    final BigDecimal frozenApproved = (pending > 0 || holdInReview) ? null : approvedAmt;
                     final BigDecimal frozenRejected = rejectedAmt;
+                    final boolean allRejectedResolved = rejected == 0;
                     // A void can turn a partially-approved claim (its last rejected receipt struck
                     // off) into a wholly-approved one — notify the claimant, mirroring the admin
                     // approve path. resubmit never reaches APPROVED (a pending line forces
@@ -794,6 +822,13 @@ public class StaffClaimService {
                                         h.setLastEditDate(DateUtil.nowSGT());
                                         return headerRepo.update(tx, h);
                                     })
+                                    // Every rejected receipt is resolved: a claim the approver returned goes
+                                    // back to the tier that returned it (no-op when no flow halted it).
+                                    .flatMap(saved -> allRejectedResolved && saved != null
+                                            ? claimApprovalFlowService
+                                                    .resumeIfReturned(tx, headerId, actor, DateUtil.nowSGT())
+                                                    .replaceWith(saved)
+                                            : Uni.createFrom().item(saved))
                                     .flatMap(saved -> (becameApproved && saved != null)
                                             ? stageClaimApprovedNotification(tx, saved, companyId)
                                                     .replaceWith(saved)
@@ -801,7 +836,7 @@ public class StaffClaimService {
                             .call(saved -> (becameApproved && saved != null)
                                     ? notifyClaimApproved(saved)
                                     : Uni.createFrom().voidItem());
-                }));
+                })));
     }
 
     /** Delegates the claim-approved outbox staging to {@link StaffClaimNotificationNotifier}. */
@@ -844,43 +879,53 @@ public class StaffClaimService {
      */
     private Uni<Void> notifyClaimSubmitted(StaffClaimDTO claim) {
         String submitter = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
-        return systemParameterService
-                .loadParameter(PARAM_HR_APPROVER)
-                .onFailure()
-                .recoverWithItem((String) null)
-                .flatMap(recipient -> {
-                    if (recipient == null || recipient.isBlank()) {
-                        System.err.println("[Notification] " + PARAM_HR_APPROVER
-                                + " not configured — submit notification skipped for claim "
-                                + claim.getUniqId());
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> resolveSubmitRecipients(pool, claim.getUniqId()).flatMap(recipients -> {
+                    if (recipients.isEmpty()) {
+                        System.err.println("[Notification] No claim approver resolved — submit notification skipped "
+                                + "for claim " + claim.getUniqId());
                         return Uni.createFrom().voidItem();
                     }
-                    // Sequential (never combined) — these reads share one reactive session.
-                    return companyPoolManager
-                            .poolFor(currentUserService.getCurrentCompanyId())
-                            .flatMap(pool -> staffRepo
-                                    .findNameByStaffId(pool, submitter)
-                                    .onFailure()
-                                    .recoverWithItem((String) null)
-                                    .flatMap(name -> loadBaseCurrencySafe().flatMap(baseCcy -> {
-                                        String who = (name != null && !name.isBlank()) ? name : submitter;
-                                        String subject = "You received staff claim submitted by " + who + " - "
-                                                + nz(claim.getClaimPeriod());
-                                        String desc = "You have received a claims submitted by " + who
-                                                + " of amount " + money(baseCcy, claim.getClaimAmount())
-                                                + " for claim period " + nz(claim.getClaimPeriod())
-                                                + " submitted on " + ts(claim.getSubmittedDate()) + ".";
-                                        return createNotification(
-                                                NOTIF_TYPE_ADMIN,
-                                                subject,
-                                                desc,
-                                                recipient,
-                                                submitter,
-                                                refOf(claim.getUniqId()));
-                                    })));
-                })
+                    return staffRepo
+                            .findNameByStaffId(pool, submitter)
+                            .onFailure()
+                            .recoverWithItem((String) null)
+                            .flatMap(name -> loadBaseCurrencySafe().flatMap(baseCcy -> {
+                                String who = (name != null && !name.isBlank()) ? name : submitter;
+                                String subject = "You received staff claim submitted by " + who + " - "
+                                        + nz(claim.getClaimPeriod());
+                                String desc = "You have received a claims submitted by " + who
+                                        + " of amount " + money(baseCcy, claim.getClaimAmount())
+                                        + " for claim period " + nz(claim.getClaimPeriod())
+                                        + " submitted on " + ts(claim.getSubmittedDate()) + ".";
+                                Uni<Void> chain = Uni.createFrom().voidItem();
+                                for (String r : recipients) {
+                                    chain = chain.flatMap(v -> createNotification(
+                                            NOTIF_TYPE_ADMIN, subject, desc, r, submitter, refOf(claim.getUniqId())));
+                                }
+                                return chain;
+                            }));
+                }))
                 .onFailure()
                 .recoverWithItem((Void) null);
+    }
+
+    /**
+     * Who to notify when a claim is submitted: the first pending tier(s) of the active approval flow,
+     * or the HR-ADMIN-APPRV-IN-CHARGE system parameter when no flow governs the claim.
+     */
+    private Uni<List<String>> resolveSubmitRecipients(SqlClient pool, Long claimId) {
+        return claimApprovalFlowService.pendingApproversFromSnapshot(pool, claimId).flatMap(flowApprovers -> {
+            if (!flowApprovers.isEmpty()) {
+                return Uni.createFrom().item(flowApprovers);
+            }
+            return systemParameterService
+                    .loadParameter(PARAM_HR_APPROVER)
+                    .onFailure()
+                    .recoverWithItem((String) null)
+                    .map(recipient -> recipient == null || recipient.isBlank() ? List.of() : List.of(recipient));
+        });
     }
 
     /**
@@ -889,35 +934,36 @@ public class StaffClaimService {
      */
     private Uni<Void> notifyClaimResubmitted(StaffClaimDTO claim) {
         String submitter = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
-        return systemParameterService
-                .loadParameter(PARAM_HR_APPROVER)
-                .onFailure()
-                .recoverWithItem((String) null)
-                .flatMap(recipient -> {
-                    if (recipient == null || recipient.isBlank()) {
+        // The approver(s) the claim is now with: the tier that returned it, or the parameter approver.
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> resolveSubmitRecipients(pool, claim.getUniqId()).flatMap(recipients -> {
+                    if (recipients.isEmpty()) {
                         return Uni.createFrom().voidItem();
                     }
-                    return companyPoolManager
-                            .poolFor(currentUserService.getCurrentCompanyId())
-                            .flatMap(pool -> staffRepo
-                                    .findNameByStaffId(pool, submitter)
-                                    .onFailure()
-                                    .recoverWithItem((String) null)
-                                    .flatMap(name -> {
-                                        String who = (name != null && !name.isBlank()) ? name : submitter;
-                                        String subject = "Receipt resubmitted for review by " + who + " - "
-                                                + nz(claim.getClaimPeriod());
-                                        String desc = who + " has resubmitted a receipt for claim period "
-                                                + nz(claim.getClaimPeriod()) + " for your review.";
-                                        return createNotification(
-                                                NOTIF_TYPE_ADMIN,
-                                                subject,
-                                                desc,
-                                                recipient,
-                                                submitter,
-                                                refOf(claim.getUniqId()));
-                                    }));
-                })
+                    return staffRepo
+                            .findNameByStaffId(pool, submitter)
+                            .onFailure()
+                            .recoverWithItem((String) null)
+                            .flatMap(name -> {
+                                String who = (name != null && !name.isBlank()) ? name : submitter;
+                                String subject = "Receipt resubmitted for review by " + who + " - "
+                                        + nz(claim.getClaimPeriod());
+                                String desc = who + " has resubmitted a receipt for claim period "
+                                        + nz(claim.getClaimPeriod()) + " for your review.";
+                                Uni<Void> chain = Uni.createFrom().voidItem();
+                                for (String recipient : recipients) {
+                                    chain = chain.flatMap(v -> createNotification(
+                                            NOTIF_TYPE_ADMIN,
+                                            subject,
+                                            desc,
+                                            recipient,
+                                            submitter,
+                                            refOf(claim.getUniqId())));
+                                }
+                                return chain;
+                            });
+                }))
                 .onFailure()
                 .recoverWithItem((Void) null);
     }
