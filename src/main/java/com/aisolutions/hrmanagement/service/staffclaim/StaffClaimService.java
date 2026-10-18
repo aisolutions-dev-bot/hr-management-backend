@@ -3,6 +3,7 @@ package com.aisolutions.hrmanagement.service.staffclaim;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDateTime;
+import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
@@ -13,6 +14,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.NotFoundException;
 
 import com.aisolutions.hrmanagement.dto.AttachmentDTO;
+import com.aisolutions.hrmanagement.dto.DropdownOptionDTO;
 import com.aisolutions.hrmanagement.dto.StaffClaimDTO;
 import com.aisolutions.hrmanagement.dto.StaffClaimDetailDTO;
 import com.aisolutions.hrmanagement.entity.StaffClaim;
@@ -22,6 +24,7 @@ import com.aisolutions.hrmanagement.repository.StaffClaimDetailRepository;
 import com.aisolutions.hrmanagement.repository.StaffClaimRepository;
 import com.aisolutions.hrmanagement.repository.StaffRepository;
 import com.aisolutions.hrmanagement.service.CurrentUserService;
+import com.aisolutions.hrmanagement.service.DocNoSeqService;
 import com.aisolutions.hrmanagement.service.SystemParameterService;
 import com.aisolutions.hrmanagement.service.attachment.AttachmentService;
 import com.aisolutions.hrmanagement.service.notification.StaffClaimNotificationNotifier;
@@ -131,6 +134,9 @@ public class StaffClaimService {
     @Inject
     StaffClaimNotificationNotifier staffClaimNotificationNotifier;
 
+    @Inject
+    DocNoSeqService docNoSeqService;
+
     // ─────────────────────────────────────────────────────────
     //  CREATE DRAFT
     // ─────────────────────────────────────────────────────────
@@ -234,17 +240,32 @@ public class StaffClaimService {
                 }));
     }
 
+    /** Claimant Staff dropdown: every active staff member except SUPERDREW. */
+    public Uni<List<DropdownOptionDTO>> claimantOptions() {
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> staffRepo.findClaimantOptions(pool));
+    }
+
     /** One claim with all its line items populated. */
     public Uni<StaffClaimDTO> getWithLines(Long headerId) {
         return companyPoolManager
                 .poolFor(currentUserService.getCurrentCompanyId())
                 .flatMap(pool -> headerRepo.findById(pool, headerId).flatMap(h -> {
                     if (h == null) return Uni.createFrom().nullItem();
-                    return detailRepo.findByHeaderId(pool, headerId).map(lines -> {
-                        List<StaffClaimDetailDTO> lineDtos =
-                                lines.stream().map(detailService::toDtoBasic).toList();
-                        return toHeaderDto(h, lineDtos);
-                    });
+                    return currentUserService.getCurrentUser().flatMap(user -> detailRepo
+                            .findByHeaderId(pool, headerId)
+                            .flatMap(lines -> {
+                                String viewer = user != null ? user.getStaffId() : null;
+                                // A claimant who did not submit the claim only sees the receipts made for them.
+                                boolean claimantOnly = viewer != null && h.getStaffId() != null
+                                        && !viewer.equalsIgnoreCase(h.getStaffId());
+                                List<StaffClaimDetailDTO> lineDtos = lines.stream()
+                                        .filter(l -> !claimantOnly || viewer.equalsIgnoreCase(l.getClaimStaffId()))
+                                        .map(detailService::toDtoBasic)
+                                        .collect(java.util.stream.Collectors.toList());
+                                return fillClaimantNames(pool, lineDtos).map(named -> toHeaderDto(h, named));
+                            }));
                 }));
     }
 
@@ -260,7 +281,7 @@ public class StaffClaimService {
             String photoContentType,
             DeviceInfo deviceInfo) {
 
-        return requireDraft(headerId).flatMap(h -> {
+        return requireDraft(headerId).flatMap(h -> normalizeClaimant(lineDto).flatMap(ok -> {
             lineDto.setClaimId(headerId);
             return detailService
                     .createClaim(lineDto, photoData, photoFileName, photoContentType)
@@ -271,6 +292,52 @@ public class StaffClaimService {
                             UserActionLogService.Action.ADD,
                             "Added receipt " + nz(saved.getReceiptNumber()) + " (" + nz(saved.getClaimType()) + ")",
                             deviceInfo));
+        }));
+    }
+
+    /**
+     * Defaults the receipt's Claimant Staff to the submitter and, when it is someone else, checks
+     * they are one of the {@link #claimantOptions()} (active staff, never SUPERDREW).
+     */
+    private Uni<Void> normalizeClaimant(StaffClaimDetailDTO lineDto) {
+        return currentUserService.getCurrentUser().flatMap(user -> {
+            String submitter = user != null && user.getStaffId() != null ? user.getStaffId() : lineDto.getStaffId();
+            String chosen = lineDto.getClaimStaffId();
+            if (StringNormalizer.isBlank(chosen) || chosen.trim().equalsIgnoreCase(submitter)) {
+                lineDto.setClaimStaffId(submitter);
+                return Uni.createFrom().voidItem();
+            }
+            return claimantOptions().flatMap(options -> {
+                String wanted = chosen.trim();
+                boolean allowed = options.stream().anyMatch(o -> wanted.equalsIgnoreCase(o.getValue()));
+                if (!allowed) {
+                    return Uni.<Void>createFrom().failure(new IllegalArgumentException("Claimant Staff is not valid"));
+                }
+                lineDto.setClaimStaffId(wanted);
+                return Uni.createFrom().voidItem();
+            });
+        });
+    }
+
+    /** Fills each receipt's claimant display name, one lookup per distinct staff id. */
+    private Uni<List<StaffClaimDetailDTO>> fillClaimantNames(SqlClient pool, List<StaffClaimDetailDTO> lines) {
+        java.util.Set<String> ids = new java.util.LinkedHashSet<>();
+        for (StaffClaimDetailDTO l : lines) {
+            if (l.getClaimStaffId() != null) ids.add(l.getClaimStaffId());
+        }
+        java.util.Map<String, String> names = new java.util.HashMap<>();
+        Uni<Void> chain = Uni.createFrom().voidItem();
+        for (String id : ids) {
+            chain = chain.flatMap(v -> staffRepo.findNameByStaffId(pool, id)
+                    .invoke(n -> names.put(id, n))
+                    .replaceWithVoid());
+        }
+        return chain.map(v -> {
+            for (StaffClaimDetailDTO l : lines) {
+                String n = names.get(l.getClaimStaffId());
+                l.setClaimStaffName(n != null ? n : l.getClaimStaffId());
+            }
+            return lines;
         });
     }
 
@@ -366,17 +433,12 @@ public class StaffClaimService {
                         .failure(new IllegalArgumentException(
                                 "Only a DRAFT claim can be submitted (current status: " + h.getStatus() + ")"));
             }
-            // Number the period at submit (JULY-2026 → JULY-2026-001) so multiple
-            // claims in one month are distinguishable. Drafts keep the plain month so
-            // the get-or-create lookup still matches.
-            String basePeriod = h.getClaimPeriod();
-            Uni<String> numberedPeriod = StringNormalizer.isBlank(basePeriod)
-                    ? Uni.createFrom().item(basePeriod)
-                    : headerRepo
-                            .findPeriodsWithSuffix(tx, h.getStaffId(), basePeriod)
-                            .map(existing -> nextNumberedPeriod(basePeriod, existing));
-            return numberedPeriod.flatMap(period -> {
-                h.setClaimPeriod(period);
+            // Number the claim at submit from m01DocNoSeq (CLMD-202610-000001). Drafts keep the
+            // plain month (JULY-2026) so the get-or-create lookup still matches.
+            return docNoSeqService
+                    .nextClaimNo(tx, YearMonth.from(now), h.getStaffId())
+                    .flatMap(claimNo -> {
+                h.setClaimPeriod(claimNo);
                 h.setClaimAmount(total);
                 h.setStatus(STATUS_SUBMITTED);
                 h.setSubmittedDate(now);
@@ -746,23 +808,6 @@ public class StaffClaimService {
     private Uni<Void> stageClaimApprovedNotification(SqlClient tx, StaffClaim claim, String companyId) {
         return staffClaimNotificationNotifier.notifyClaimApproved(
                 new NotificationTransaction(tx, resolveNotificationCompanyId(companyId)), claim);
-    }
-
-    /** Next numbered period under a base month, e.g. "JULY-2026" → "JULY-2026-002" given an
-     *  existing "JULY-2026-001"; zero-padded to three digits. */
-    private String nextNumberedPeriod(String basePeriod, List<String> existing) {
-        String prefix = basePeriod + "-";
-        int max = 0;
-        for (String p : existing) {
-            if (p == null || !p.startsWith(prefix)) continue;
-            try {
-                int n = Integer.parseInt(p.substring(prefix.length()).trim());
-                if (n > max) max = n;
-            } catch (NumberFormatException ignored) {
-                /* not a numeric suffix */
-            }
-        }
-        return String.format("%s-%03d", basePeriod, max + 1);
     }
 
     private BigDecimal sumClaimAmount(List<StaffClaimDetail> lines) {

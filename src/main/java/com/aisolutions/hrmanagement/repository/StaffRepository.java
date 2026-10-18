@@ -75,6 +75,30 @@ public class StaffRepository {
     }
 
     /**
+     * "Claimant Staff" dropdown options (value = staffId, label = "Name (staffId)"): every active
+     * staff member except the SUPERDREW superadmin accounts.
+     */
+    public Uni<List<DropdownOptionDTO>> findClaimantOptions(SqlClient client) {
+        return client.preparedQuery(
+                "SELECT StaffId, Name FROM m03Staff " +
+                "WHERE StaffId IS NOT NULL AND StaffId <> '' " +
+                "AND (Status IS NULL OR Status <> 'T') " +
+                "AND UPPER(StaffId) NOT IN ('SUPERDREW', 'SUPERDEW') " +
+                "ORDER BY Name")
+            .execute()
+            .map(rows -> {
+                List<DropdownOptionDTO> result = new ArrayList<>();
+                for (Row row : rows) {
+                    String staffId = row.getString("StaffId");
+                    String name = row.getString("Name");
+                    result.add(new DropdownOptionDTO(staffId,
+                            name != null && !name.isBlank() ? name + " (" + staffId + ")" : staffId));
+                }
+                return result;
+            });
+    }
+
+    /**
      * True when the group holds a granted access code (AccessValue = 1) for the module —
      * reads m07GroupAuthorityAccess on the caller's tenant pool.
      */

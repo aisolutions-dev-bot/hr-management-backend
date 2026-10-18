@@ -22,6 +22,10 @@ public class StaffClaimDetailDTO {
     private LocalDateTime lastEditDate;
 
     private String staffId;
+    /** "Claimant Staff": who this receipt is claimed for; defaults to the submitter. */
+    private String claimStaffId;
+    /** Display name of {@link #claimStaffId}, set by the service on read. */
+    private String claimStaffName;
     private String projectId;
     private String claimType;
     private LocalDateTime claimDate;

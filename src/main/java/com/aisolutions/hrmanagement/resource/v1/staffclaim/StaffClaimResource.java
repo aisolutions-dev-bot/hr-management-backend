@@ -86,6 +86,13 @@ public class StaffClaimResource {
         });
     }
 
+    // ── CLAIMANT STAFF dropdown: active staff except SUPERDREW ──
+    @GET
+    @Path("/claimant-options")
+    public Uni<Response> claimantOptions() {
+        return access.gate(CODE, () -> claimService.claimantOptions().map(list -> Response.ok(list).build()));
+    }
+
     // ── GET ONE (with lines) ──
     @GET
     @Path("/{id}")

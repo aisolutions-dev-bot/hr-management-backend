@@ -18,21 +18,26 @@ import java.util.List;
 @Slf4j
 public class StaffClaimRepository {
 
+    private static final String COLUMNS =
+            "UniqId, StaffId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, " +
+            "ClaimPeriod, ClaimAmount, Status, SubmittedDate, ApprovedAmount, RejectedAmount";
+
     public Uni<StaffClaim> findById(SqlClient client, Long id) {
-        return client.preparedQuery(
-                "SELECT UniqId, StaffId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, " +
-                "ClaimPeriod, ClaimAmount, Status, SubmittedDate, ApprovedAmount, RejectedAmount " +
-                "FROM m18StaffClaims WHERE UniqId = ?")
+        return client.preparedQuery("SELECT " + COLUMNS + " FROM m18StaffClaims WHERE UniqId = ?")
             .execute(Tuple.tuple().addValue(id))
             .map(rows -> rows.iterator().hasNext() ? toEntity(rows.iterator().next()) : null);
     }
 
+    /**
+     * Claims this staff member submitted, plus submitted claims where another staff member entered a
+     * receipt FOR them (an unsubmitted draft is not the claimant's to see or submit).
+     */
     public Uni<List<StaffClaim>> findByStaff(SqlClient client, String staffId) {
         return client.preparedQuery(
-                "SELECT UniqId, StaffId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, " +
-                "ClaimPeriod, ClaimAmount, Status, SubmittedDate, ApprovedAmount, RejectedAmount " +
-                "FROM m18StaffClaims WHERE StaffId = ? ORDER BY UniqId DESC")
-            .execute(Tuple.tuple().addValue(staffId))
+                "SELECT " + COLUMNS + " FROM m18StaffClaims " +
+                "WHERE StaffId = ? OR (Status <> 'DRAFT' AND UniqId IN " +
+                "(SELECT ClaimId FROM m18StaffClaimsDet WHERE ClaimStaffID = ?)) ORDER BY UniqId DESC")
+            .execute(Tuple.tuple().addValue(staffId).addValue(staffId))
             .map(this::toList);
     }
 
@@ -41,10 +46,8 @@ public class StaffClaimRepository {
      */
     public Uni<StaffClaim> findByStaffPeriodStatus(SqlClient client, String staffId, String period, String status) {
         return client.preparedQuery(
-                "SELECT UniqId, StaffId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, " +
-                "ClaimPeriod, ClaimAmount, Status, SubmittedDate, ApprovedAmount, RejectedAmount " +
-                "FROM m18StaffClaims WHERE StaffId = ? AND ClaimPeriod = ? AND Status = ? " +
-                "ORDER BY UniqId DESC LIMIT 1")
+                "SELECT " + COLUMNS + " FROM m18StaffClaims " +
+                "WHERE StaffId = ? AND ClaimPeriod = ? AND Status = ? ORDER BY UniqId DESC LIMIT 1")
             .execute(Tuple.tuple().addValue(staffId).addValue(period).addValue(status))
             .map(rows -> rows.iterator().hasNext() ? toEntity(rows.iterator().next()) : null);
     }
@@ -60,26 +63,10 @@ public class StaffClaimRepository {
             .map(rows -> rows.iterator().hasNext() ? rows.iterator().next().getLong("UniqId") : null);
     }
 
-    /**
-     * This staff's numbered periods under a base month.
-     */
-    public Uni<List<String>> findPeriodsWithSuffix(SqlClient client, String staffId, String basePeriod) {
-        return client.preparedQuery(
-                "SELECT ClaimPeriod FROM m18StaffClaims WHERE StaffId = ? AND ClaimPeriod LIKE ?")
-            .execute(Tuple.tuple().addValue(staffId).addValue(basePeriod + "-%"))
-            .map(rows -> {
-                List<String> result = new ArrayList<>();
-                for (Row row : rows) {
-                    result.add(row.getString("ClaimPeriod"));
-                }
-                return result;
-            });
-    }
-
     public Uni<StaffClaim> save(SqlClient client, StaffClaim entity) {
         return client.preparedQuery(
-                "INSERT INTO m18StaffClaims (StaffId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, " +
-                "ClaimPeriod, ClaimAmount, Status, SubmittedDate, ApprovedAmount, RejectedAmount) " +
+                "INSERT INTO m18StaffClaims (StaffId, EntryStaff, EntryDate, LastEditStaff, " +
+                "LastEditDate, ClaimPeriod, ClaimAmount, Status, SubmittedDate, ApprovedAmount, RejectedAmount) " +
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .execute(Tuple.tuple()
                 .addValue(entity.getStaffId())

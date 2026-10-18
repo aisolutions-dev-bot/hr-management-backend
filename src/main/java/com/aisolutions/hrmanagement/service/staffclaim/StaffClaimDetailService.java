@@ -217,6 +217,8 @@ public class StaffClaimDetailService {
 
         e.setStaffId(StringNormalizer.truncate(
                 staffIdOverride != null ? staffIdOverride : dto.getStaffId(), LEN_STAFF_ID));
+        e.setClaimStaffId(StringNormalizer.truncate(
+                StringNormalizer.isBlank(dto.getClaimStaffId()) ? e.getStaffId() : dto.getClaimStaffId(), LEN_STAFF_ID));
         e.setProjectId(StringNormalizer.truncate(dto.getProjectId(), LEN_PROJECT_ID));
         e.setClaimType(StringNormalizer.truncate(dto.getClaimType(), LEN_CLAIM_TYPE));
         e.setClaimDate(dto.getClaimDate());
@@ -258,6 +260,7 @@ public class StaffClaimDetailService {
         dto.setUniqId(e.getUniqId());
         dto.setClaimId(e.getClaimId());
         dto.setStaffId(e.getStaffId());
+        dto.setClaimStaffId(e.getClaimStaffId());
         dto.setProjectId(e.getProjectId());
         dto.setClaimType(e.getClaimType());
         dto.setClaimDate(e.getClaimDate());
