@@ -59,8 +59,7 @@ public final class ReceiptTaxParser {
         BigDecimal serviceOrZero = service == null ? zero(amountScale(currency)) : service;
         if (total == null || (amount == null && rate == null)) {
             BigDecimal none = zero(amountScale(currency));
-            return new Tax(NO_TAX, zero(RATE_SCALE), none,
-                    subTotal(printed, total, serviceOrZero, currency), service);
+            return new Tax(NO_TAX, zero(RATE_SCALE), none, subTotal(printed, total, serviceOrZero, currency), service);
         }
         if (rate == null) {
             rate = impliedRate(amount, total);
@@ -69,8 +68,12 @@ public final class ReceiptTaxParser {
         } else if (impliedRate(amount, total).subtract(rate).abs().compareTo(RATE_CONFLICT) > 0) {
             rate = impliedRate(amount, total);
         }
-        return new Tax(cleanType(printed.type()), rate.setScale(RATE_SCALE, RoundingMode.HALF_UP), amount,
-                subTotal(printed, total, amount.add(serviceOrZero), currency), service);
+        return new Tax(
+                cleanType(printed.type()),
+                rate.setScale(RATE_SCALE, RoundingMode.HALF_UP),
+                amount,
+                subTotal(printed, total, amount.add(serviceOrZero), currency),
+                service);
     }
 
     private static BigDecimal zero(int scale) {
@@ -118,7 +121,9 @@ public final class ReceiptTaxParser {
         }
         ReceiptAmountParser.Result parsed = ReceiptAmountParser.parse(printed.subTotal(), currency);
         BigDecimal sub = parsed.amount();
-        boolean usable = sub != null && parsed.warning() == null && sub.signum() > 0
+        boolean usable = sub != null
+                && parsed.warning() == null
+                && sub.signum() > 0
                 && sub.add(charges).compareTo(total.add(ROUNDING)) <= 0;
         return usable ? sub : total.subtract(charges);
     }
