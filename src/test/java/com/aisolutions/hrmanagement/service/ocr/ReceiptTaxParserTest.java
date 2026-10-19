@@ -111,8 +111,7 @@ class ReceiptTaxParserTest {
     @Test
     @DisplayName("a tax name with no figures is treated as no tax")
     void typeWithoutFigures() {
-        assertEquals(
-                NO_TAX, ReceiptTaxParser.parse(p(SST, null, null), TOTAL, MYR).type());
+        assertEquals(NO_TAX, ReceiptTaxParser.parse(p(SST, null, null), TOTAL, MYR).type());
     }
 
     @Test
@@ -135,16 +134,13 @@ class ReceiptTaxParserTest {
     @Test
     @DisplayName("a rate above 30 percent is treated as a misread")
     void rateTooHigh() {
-        assertEquals(
-                NO_TAX, ReceiptTaxParser.parse(p(SST, "60%", null), TOTAL, MYR).type());
+        assertEquals(NO_TAX, ReceiptTaxParser.parse(p(SST, "60%", null), TOTAL, MYR).type());
     }
 
     @Test
     @DisplayName("a comma used as the decimal point in a rate is read")
     void commaRate() {
-        assertEquals(
-                d("7.50"),
-                ReceiptTaxParser.parse(p("VAT", "7,5%", null), TOTAL, "EUR").rate());
+        assertEquals(d("7.50"), ReceiptTaxParser.parse(p("VAT", "7,5%", null), TOTAL, "EUR").rate());
     }
 
     @Test
