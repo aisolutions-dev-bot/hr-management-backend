@@ -45,10 +45,6 @@ public class StaffClaimDetail {
     @Column(name = "StaffId", length = 25)
     private String staffId;
 
-    /** The staff member this receipt is claimed for; defaults to {@link #staffId} (the submitter). */
-    @Column(name = "ClaimStaffID", length = 25)
-    private String claimStaffId;
-
     @Column(name = "ProjectId", length = 25)
     private String projectId;
 

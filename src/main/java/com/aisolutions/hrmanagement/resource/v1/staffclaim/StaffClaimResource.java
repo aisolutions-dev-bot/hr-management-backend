@@ -34,6 +34,7 @@ import java.util.Map;
  *   POST   /api/v1/staff-claims/current-draft         — get-or-create this month's open draft
  *   GET    /api/v1/staff-claims?staffId=X             — list a staff member's claims (header level)
  *   GET    /api/v1/staff-claims/{id}                  — fetch one claim WITH its line items
+ *   PUT    /api/v1/staff-claims/{id}/claimant         — change the claim's Claimant Staff (draft only)
  *   POST   /api/v1/staff-claims/{id}/lines            — add a line (+optional receipt photo, multipart)
  *   DELETE /api/v1/staff-claims/{id}/lines/{lineId}   — remove a line (draft only)
  *   POST   /api/v1/staff-claims/{id}/submit           — submit the claim for approval
@@ -91,6 +92,20 @@ public class StaffClaimResource {
     @Path("/claimant-options")
     public Uni<Response> claimantOptions() {
         return access.gate(CODE, () -> claimService.claimantOptions().map(list -> Response.ok(list).build()));
+    }
+
+    // ── CHANGE CLAIMANT (draft only): the whole claim is for this staff member ──
+    @PUT
+    @Path("/{id}/claimant")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Uni<Response> changeClaimant(@PathParam("id") Long id, StaffClaimDTO dto) {
+        return access.gate(
+                CODE,
+                () -> claimService
+                        .changeClaimant(id, dto == null ? null : dto.getClaimStaffId())
+                        .map(claim -> Response.ok(claim).build())
+                        .onFailure()
+                        .recoverWithItem(StaffClaimResource::toError));
     }
 
     // ── APPROVAL TRAIL (applicant view) ──

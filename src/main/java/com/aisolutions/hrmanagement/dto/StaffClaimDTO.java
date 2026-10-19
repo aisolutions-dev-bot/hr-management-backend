@@ -24,7 +24,13 @@ import lombok.NoArgsConstructor;
 public class StaffClaimDTO {
 
     private Long uniqId;
+    /** Who entered the claim (the submitter). */
     private String staffId;
+    /** Claimant Staff — the whole claim is for this staff member; defaults to {@link #staffId}. */
+    private String claimStaffId;
+    /** Display name of {@link #claimStaffId}, set by the service when one claim is fetched. */
+    private String claimStaffName;
+
     private String entryStaff;
     private LocalDateTime entryDate;
     private String lastEditStaff;

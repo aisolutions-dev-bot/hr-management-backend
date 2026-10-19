@@ -33,8 +33,13 @@ public class StaffClaim {
     @Column(name = "UniqId", nullable = false, updatable = false)
     private Long uniqId;
 
+    /** Who entered the claim (the submitter). */
     @Column(name = "StaffId", length = 25)
     private String staffId;
+
+    /** Claimant Staff: the whole claim is for this staff member; defaults to {@link #staffId}. */
+    @Column(name = "ClaimStaffID", length = 25)
+    private String claimStaffId;
 
     @Column(name = "EntryStaff", length = 25)
     private String entryStaff;

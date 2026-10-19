@@ -22,7 +22,7 @@ public class StaffClaimDetailRepository {
     public Uni<StaffClaimDetail> findById(SqlClient client, Long id) {
         return client.preparedQuery(
                 "SELECT UniqId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, ClaimId, " +
-                "StaffId, ClaimStaffID, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
+                "StaffId, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
                 "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
                 "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason " +
                 "FROM m18StaffClaimsDet WHERE UniqId = ?")
@@ -34,7 +34,7 @@ public class StaffClaimDetailRepository {
             SqlClient client, String staffId, LocalDateTime from, LocalDateTime to) {
         return client.preparedQuery(
                 "SELECT UniqId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, ClaimId, " +
-                "StaffId, ClaimStaffID, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
+                "StaffId, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
                 "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
                 "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason " +
                 "FROM m18StaffClaimsDet WHERE StaffId = ? AND ClaimDate >= ? AND ClaimDate < ? " +
@@ -46,7 +46,7 @@ public class StaffClaimDetailRepository {
     public Uni<List<StaffClaimDetail>> findByStaff(SqlClient client, String staffId) {
         return client.preparedQuery(
                 "SELECT UniqId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, ClaimId, " +
-                "StaffId, ClaimStaffID, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
+                "StaffId, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
                 "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
                 "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason " +
                 "FROM m18StaffClaimsDet WHERE StaffId = ? ORDER BY ClaimDate DESC")
@@ -77,7 +77,7 @@ public class StaffClaimDetailRepository {
     public Uni<List<StaffClaimDetail>> findByHeaderId(SqlClient client, Long claimId) {
         return client.preparedQuery(
                 "SELECT UniqId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, ClaimId, " +
-                "StaffId, ClaimStaffID, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
+                "StaffId, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
                 "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
                 "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason " +
                 "FROM m18StaffClaimsDet WHERE ClaimId = ? ORDER BY ClaimDate ASC, UniqId ASC")
@@ -99,10 +99,10 @@ public class StaffClaimDetailRepository {
     public Uni<StaffClaimDetail> save(SqlClient client, StaffClaimDetail entity) {
         return client.preparedQuery(
                 "INSERT INTO m18StaffClaimsDet (EntryStaff, EntryDate, LastEditStaff, LastEditDate, " +
-                "ClaimId, StaffId, ClaimStaffID, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
+                "ClaimId, StaffId, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
                 "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
                 "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .execute(Tuple.tuple()
                 .addValue(entity.getEntryStaff())
                 .addValue(entity.getEntryDate())
@@ -110,7 +110,6 @@ public class StaffClaimDetailRepository {
                 .addValue(entity.getLastEditDate())
                 .addValue(entity.getClaimId())
                 .addValue(entity.getStaffId())
-                .addValue(entity.getClaimStaffId())
                 .addValue(entity.getProjectId())
                 .addValue(entity.getClaimType())
                 .addValue(entity.getClaimDate())
@@ -137,7 +136,7 @@ public class StaffClaimDetailRepository {
     public Uni<StaffClaimDetail> update(SqlClient client, StaffClaimDetail entity) {
         return client.preparedQuery(
                 "UPDATE m18StaffClaimsDet SET EntryStaff = ?, EntryDate = ?, LastEditStaff = ?, " +
-                "LastEditDate = ?, ClaimId = ?, StaffId = ?, ClaimStaffID = ?, ProjectId = ?, ClaimType = ?, " +
+                "LastEditDate = ?, ClaimId = ?, StaffId = ?, ProjectId = ?, ClaimType = ?, " +
                 "ClaimDate = ?, ClaimDescription = ?, MerchantName = ?, ReceiptNumber = ?, " +
                 "ReceiptDate = ?, ReceiptAmount = ?, ClaimAmount = ?, Currency = ?, " +
                 "DetectedCurrency = ?, ExchangeRate = ?, Status = ?, ApprovedBy = ?, " +
@@ -149,7 +148,6 @@ public class StaffClaimDetailRepository {
                 .addValue(entity.getLastEditDate())
                 .addValue(entity.getClaimId())
                 .addValue(entity.getStaffId())
-                .addValue(entity.getClaimStaffId())
                 .addValue(entity.getProjectId())
                 .addValue(entity.getClaimType())
                 .addValue(entity.getClaimDate())
@@ -193,8 +191,6 @@ public class StaffClaimDetailRepository {
         e.setLastEditDate(row.getLocalDateTime("LastEditDate"));
         e.setClaimId(row.getLong("ClaimId"));
         e.setStaffId(row.getString("StaffId"));
-        String claimStaffId = row.getString("ClaimStaffID");
-        e.setClaimStaffId(claimStaffId == null || claimStaffId.isBlank() ? e.getStaffId() : claimStaffId);
         e.setProjectId(row.getString("ProjectId"));
         e.setClaimType(row.getString("ClaimType"));
         e.setClaimDate(row.getLocalDateTime("ClaimDate"));

@@ -19,7 +19,7 @@ import java.util.List;
 public class StaffClaimRepository {
 
     private static final String COLUMNS =
-            "UniqId, StaffId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, " +
+            "UniqId, StaffId, ClaimStaffID, EntryStaff, EntryDate, LastEditStaff, LastEditDate, " +
             "ClaimPeriod, ClaimAmount, Status, SubmittedDate, ApprovedAmount, RejectedAmount";
 
     public Uni<StaffClaim> findById(SqlClient client, Long id) {
@@ -29,14 +29,13 @@ public class StaffClaimRepository {
     }
 
     /**
-     * Claims this staff member submitted, plus submitted claims where another staff member entered a
-     * receipt FOR them (an unsubmitted draft is not the claimant's to see or submit).
+     * Claims this staff member entered, plus submitted claims another staff member entered FOR them
+     * (an unsubmitted draft is not the claimant's to see or submit).
      */
     public Uni<List<StaffClaim>> findByStaff(SqlClient client, String staffId) {
         return client.preparedQuery(
                 "SELECT " + COLUMNS + " FROM m18StaffClaims " +
-                "WHERE StaffId = ? OR (Status <> 'DRAFT' AND UniqId IN " +
-                "(SELECT ClaimId FROM m18StaffClaimsDet WHERE ClaimStaffID = ?)) ORDER BY UniqId DESC")
+                "WHERE StaffId = ? OR (Status <> 'DRAFT' AND ClaimStaffID = ?) ORDER BY UniqId DESC")
             .execute(Tuple.tuple().addValue(staffId).addValue(staffId))
             .map(this::toList);
     }
@@ -65,11 +64,13 @@ public class StaffClaimRepository {
 
     public Uni<StaffClaim> save(SqlClient client, StaffClaim entity) {
         return client.preparedQuery(
-                "INSERT INTO m18StaffClaims (StaffId, EntryStaff, EntryDate, LastEditStaff, " +
-                "LastEditDate, ClaimPeriod, ClaimAmount, Status, SubmittedDate, ApprovedAmount, RejectedAmount) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                "INSERT INTO m18StaffClaims (StaffId, ClaimStaffID, EntryStaff, EntryDate, " +
+                "LastEditStaff, LastEditDate, ClaimPeriod, ClaimAmount, Status, SubmittedDate, " +
+                "ApprovedAmount, RejectedAmount) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .execute(Tuple.tuple()
                 .addValue(entity.getStaffId())
+                .addValue(entity.getClaimStaffId())
                 .addValue(entity.getEntryStaff())
                 .addValue(entity.getEntryDate())
                 .addValue(entity.getLastEditStaff())
@@ -89,12 +90,13 @@ public class StaffClaimRepository {
 
     public Uni<StaffClaim> update(SqlClient client, StaffClaim entity) {
         return client.preparedQuery(
-                "UPDATE m18StaffClaims SET StaffId = ?, EntryStaff = ?, EntryDate = ?, " +
+                "UPDATE m18StaffClaims SET StaffId = ?, ClaimStaffID = ?, EntryStaff = ?, EntryDate = ?, " +
                 "LastEditStaff = ?, LastEditDate = ?, ClaimPeriod = ?, ClaimAmount = ?, " +
                 "Status = ?, SubmittedDate = ?, ApprovedAmount = ?, RejectedAmount = ? " +
                 "WHERE UniqId = ?")
             .execute(Tuple.tuple()
                 .addValue(entity.getStaffId())
+                .addValue(entity.getClaimStaffId())
                 .addValue(entity.getEntryStaff())
                 .addValue(entity.getEntryDate())
                 .addValue(entity.getLastEditStaff())
@@ -121,6 +123,8 @@ public class StaffClaimRepository {
         StaffClaim e = new StaffClaim();
         e.setUniqId(row.getLong("UniqId"));
         e.setStaffId(row.getString("StaffId"));
+        String claimStaffId = row.getString("ClaimStaffID");
+        e.setClaimStaffId(claimStaffId == null || claimStaffId.isBlank() ? e.getStaffId() : claimStaffId);
         e.setEntryStaff(row.getString("EntryStaff"));
         e.setEntryDate(row.getLocalDateTime("EntryDate"));
         e.setLastEditStaff(row.getString("LastEditStaff"));

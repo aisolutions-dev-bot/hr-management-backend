@@ -203,6 +203,7 @@ public class StaffClaimService {
         LocalDateTime now = DateUtil.nowSGT();
         StaffClaim h = new StaffClaim();
         h.setStaffId(StringNormalizer.truncate(staffId, LEN_STAFF_ID));
+        h.setClaimStaffId(h.getStaffId());
         h.setClaimPeriod(StringNormalizer.truncate(period, LEN_PERIOD));
         h.setClaimAmount(BigDecimal.ZERO);
         h.setStatus(STATUS_DRAFT);
@@ -228,20 +229,46 @@ public class StaffClaimService {
                         return Uni.createFrom().item(List.<StaffClaimDTO>of());
                     }
                     List<Long> ids = headers.stream().map(h -> h.getUniqId()).toList();
-                    return detailRepo.countByHeaderIds(pool, ids).map(rows -> {
-                        java.util.Map<Long, Integer> counts = new java.util.HashMap<>();
-                        for (io.vertx.mutiny.sqlclient.Row r : rows) {
-                            counts.put(r.getLong("ClaimId"), r.getInteger("cnt"));
-                        }
-                        return headers.stream()
-                                .map(h -> {
-                                    StaffClaimDTO dto = toHeaderDto(h, null);
-                                    dto.setLineCount(counts.getOrDefault(h.getUniqId(), 0));
-                                    return dto;
-                                })
-                                .toList();
-                    });
+                    return detailRepo
+                            .countByHeaderIds(pool, ids)
+                            .map(rows -> {
+                                java.util.Map<Long, Integer> counts = new java.util.HashMap<>();
+                                for (io.vertx.mutiny.sqlclient.Row r : rows) {
+                                    counts.put(r.getLong("ClaimId"), r.getInteger("cnt"));
+                                }
+                                return headers.stream()
+                                        .map(h -> {
+                                            StaffClaimDTO dto = toHeaderDto(h, null);
+                                            dto.setLineCount(counts.getOrDefault(h.getUniqId(), 0));
+                                            return dto;
+                                        })
+                                        .toList();
+                            })
+                            .flatMap(dtos -> fillClaimantNames(pool, dtos));
                 }));
+    }
+
+    /** Fills each claim's claimant display name, one lookup per distinct staff id. */
+    private Uni<List<StaffClaimDTO>> fillClaimantNames(SqlClient pool, List<StaffClaimDTO> claims) {
+        java.util.Map<String, String> names = new java.util.HashMap<>();
+        Uni<Void> chain = Uni.createFrom().voidItem();
+        for (String id : claims.stream()
+                .map(StaffClaimDTO::getClaimStaffId)
+                .filter(s -> s != null && !s.isBlank())
+                .distinct()
+                .toList()) {
+            chain = chain.flatMap(v -> staffRepo
+                    .findNameByStaffId(pool, id)
+                    .invoke(n -> names.put(id, n))
+                    .replaceWithVoid());
+        }
+        return chain.map(v -> {
+            for (StaffClaimDTO c : claims) {
+                String n = names.get(c.getClaimStaffId());
+                c.setClaimStaffName(n != null ? n : c.getClaimStaffId());
+            }
+            return claims;
+        });
     }
 
     /** Claimant Staff dropdown: every active staff member except SUPERDREW. */
@@ -260,26 +287,37 @@ public class StaffClaimService {
                         : claimApprovalFlowService.buildTrail(pool, headerId, h.getStatus())));
     }
 
-    /** One claim with all its line items populated. */
+    /** One claim with all its line items; only its owner, or its claimant once submitted, can read it. */
     public Uni<StaffClaimDTO> getWithLines(Long headerId) {
         return companyPoolManager
                 .poolFor(currentUserService.getCurrentCompanyId())
                 .flatMap(pool -> headerRepo.findById(pool, headerId).flatMap(h -> {
                     if (h == null) return Uni.createFrom().nullItem();
-                    return currentUserService.getCurrentUser().flatMap(user -> detailRepo
-                            .findByHeaderId(pool, headerId)
-                            .flatMap(lines -> {
-                                String viewer = user != null ? user.getStaffId() : null;
-                                // A claimant who did not submit the claim only sees the receipts made for them.
-                                boolean claimantOnly = viewer != null && h.getStaffId() != null
-                                        && !viewer.equalsIgnoreCase(h.getStaffId());
-                                List<StaffClaimDetailDTO> lineDtos = lines.stream()
-                                        .filter(l -> !claimantOnly || viewer.equalsIgnoreCase(l.getClaimStaffId()))
-                                        .map(detailService::toDtoBasic)
-                                        .collect(java.util.stream.Collectors.toList());
-                                return fillClaimantNames(pool, lineDtos).map(named -> toHeaderDto(h, named));
-                            }));
+                    return currentUserService.getCurrentUser().flatMap(user -> {
+                        if (!canView(h, user == null ? null : user.getStaffId())) {
+                            return Uni.<StaffClaimDTO>createFrom().nullItem();
+                        }
+                        return detailRepo.findByHeaderId(pool, headerId).flatMap(lines -> {
+                            List<StaffClaimDetailDTO> lineDtos = lines.stream()
+                                    .map(detailService::toDtoBasic)
+                                    .collect(java.util.stream.Collectors.toList());
+                            return staffRepo
+                                    .findNameByStaffId(pool, h.getClaimStaffId())
+                                    .map(name -> {
+                                        StaffClaimDTO dto = toHeaderDto(h, lineDtos);
+                                        dto.setClaimStaffName(name != null ? name : h.getClaimStaffId());
+                                        return dto;
+                                    });
+                        });
+                    });
                 }));
+    }
+
+    private static boolean canView(StaffClaim h, String viewer) {
+        if (viewer == null) return false;
+        boolean owner = viewer.equalsIgnoreCase(h.getStaffId());
+        boolean claimant = viewer.equalsIgnoreCase(h.getClaimStaffId()) && !STATUS_DRAFT.equals(h.getStatus());
+        return owner || claimant;
     }
 
     // ─────────────────────────────────────────────────────────
@@ -294,7 +332,7 @@ public class StaffClaimService {
             String photoContentType,
             DeviceInfo deviceInfo) {
 
-        return requireDraft(headerId).flatMap(h -> normalizeClaimant(lineDto).flatMap(ok -> {
+        return requireDraft(headerId).flatMap(h -> {
             lineDto.setClaimId(headerId);
             return detailService
                     .createClaim(lineDto, photoData, photoFileName, photoContentType)
@@ -305,53 +343,44 @@ public class StaffClaimService {
                             UserActionLogService.Action.ADD,
                             "Added receipt " + nz(saved.getReceiptNumber()) + " (" + nz(saved.getClaimType()) + ")",
                             deviceInfo));
-        }));
+        });
     }
 
     /**
-     * Defaults the receipt's Claimant Staff to the submitter and, when it is someone else, checks
-     * they are one of the {@link #claimantOptions()} (active staff, never SUPERDREW).
+     * Sets the claim's Claimant Staff — the whole claim is for them. Draft only, and only the staff
+     * member who entered it may change it; the new claimant must be one of {@link #claimantOptions()}.
      */
-    private Uni<Void> normalizeClaimant(StaffClaimDetailDTO lineDto) {
-        return currentUserService.getCurrentUser().flatMap(user -> {
-            String submitter = user != null && user.getStaffId() != null ? user.getStaffId() : lineDto.getStaffId();
-            String chosen = lineDto.getClaimStaffId();
-            if (StringNormalizer.isBlank(chosen) || chosen.trim().equalsIgnoreCase(submitter)) {
-                lineDto.setClaimStaffId(submitter);
-                return Uni.createFrom().voidItem();
-            }
-            return claimantOptions().flatMap(options -> {
-                String wanted = chosen.trim();
-                boolean allowed = options.stream().anyMatch(o -> wanted.equalsIgnoreCase(o.getValue()));
-                if (!allowed) {
-                    return Uni.<Void>createFrom().failure(new IllegalArgumentException("Claimant Staff is not valid"));
-                }
-                lineDto.setClaimStaffId(wanted);
-                return Uni.createFrom().voidItem();
-            });
-        });
+    public Uni<StaffClaimDTO> changeClaimant(Long headerId, String claimantId) {
+        return requireDraft(headerId)
+                .flatMap(h -> currentUserService.getCurrentUser().flatMap(user -> {
+                    String me = user != null ? user.getStaffId() : null;
+                    String owner = h.getStaffId();
+                    if (me == null || (owner != null && !me.equalsIgnoreCase(owner))) {
+                        return claimantRejected("Only the staff who entered this claim can change its claimant");
+                    }
+                    if (StringNormalizer.isBlank(claimantId)) {
+                        return claimantRejected("Claimant Staff is required");
+                    }
+                    String wanted = claimantId.trim();
+                    return claimantOptions().flatMap(options -> {
+                        boolean allowed = options.stream().anyMatch(o -> wanted.equalsIgnoreCase(o.getValue()))
+                                || wanted.equalsIgnoreCase(owner);
+                        if (!allowed) {
+                            return claimantRejected("Claimant Staff is not valid");
+                        }
+                        h.setClaimStaffId(StringNormalizer.truncate(wanted, LEN_STAFF_ID));
+                        h.setLastEditStaff(me != null ? me : h.getEntryStaff());
+                        h.setLastEditDate(DateUtil.nowSGT());
+                        return companyPoolManager
+                                .poolFor(currentUserService.getCurrentCompanyId())
+                                .flatMap(pool -> pool.withTransaction(tx -> headerRepo.update(tx, h)))
+                                .flatMap(saved -> getWithLines(headerId));
+                    });
+                }));
     }
 
-    /** Fills each receipt's claimant display name, one lookup per distinct staff id. */
-    private Uni<List<StaffClaimDetailDTO>> fillClaimantNames(SqlClient pool, List<StaffClaimDetailDTO> lines) {
-        java.util.Set<String> ids = new java.util.LinkedHashSet<>();
-        for (StaffClaimDetailDTO l : lines) {
-            if (l.getClaimStaffId() != null) ids.add(l.getClaimStaffId());
-        }
-        java.util.Map<String, String> names = new java.util.HashMap<>();
-        Uni<Void> chain = Uni.createFrom().voidItem();
-        for (String id : ids) {
-            chain = chain.flatMap(v -> staffRepo.findNameByStaffId(pool, id)
-                    .invoke(n -> names.put(id, n))
-                    .replaceWithVoid());
-        }
-        return chain.map(v -> {
-            for (StaffClaimDetailDTO l : lines) {
-                String n = names.get(l.getClaimStaffId());
-                l.setClaimStaffName(n != null ? n : l.getClaimStaffId());
-            }
-            return lines;
-        });
+    private static Uni<StaffClaimDTO> claimantRejected(String message) {
+        return Uni.createFrom().failure(new IllegalArgumentException(message));
     }
 
     public Uni<Void> removeLine(Long headerId, Long lineId) {
@@ -436,14 +465,17 @@ public class StaffClaimService {
                 }));
     }
 
-    /** Freezes the claim approval flow onto the submitted claim, resolving tiers for the submitter's department. */
+    /** Freezes the claim approval flow onto the submitted claim, resolving tiers for the claimant's department. */
     private Uni<Void> snapshotClaimFlow(SqlClient tx, StaffClaim saved, LocalDateTime now) {
-        return staffRepo.findByStaffId(tx, saved.getStaffId())
-                .onFailure().recoverWithItem((com.aisolutions.hrmanagement.entity.Staff) null)
-                .flatMap(staff -> claimApprovalFlowService.snapshotAtSubmit(tx,
+        String claimant = saved.getClaimStaffId() != null ? saved.getClaimStaffId() : saved.getStaffId();
+        return staffRepo
+                .findByStaffId(tx, claimant)
+                .onFailure()
+                .recoverWithItem((com.aisolutions.hrmanagement.entity.Staff) null)
+                .flatMap(staff -> claimApprovalFlowService.snapshotAtSubmit(
+                        tx,
                         new com.aisolutions.hrmanagement.service.approval.ClaimApprovalFlowService.SubmitContext(
-                                saved.getUniqId(), staff != null ? staff.getDepartment() : null,
-                                saved.getStaffId(), now)));
+                                saved.getUniqId(), staff != null ? staff.getDepartment() : null, claimant, now)));
     }
 
     /** Validates the draft header, applies the numbered period and persists the SUBMITTED state. */
@@ -1047,6 +1079,7 @@ public class StaffClaimService {
         StaffClaimDTO dto = new StaffClaimDTO();
         dto.setUniqId(h.getUniqId());
         dto.setStaffId(h.getStaffId());
+        dto.setClaimStaffId(h.getClaimStaffId());
         dto.setEntryStaff(h.getEntryStaff());
         dto.setEntryDate(h.getEntryDate());
         dto.setLastEditStaff(h.getLastEditStaff());
