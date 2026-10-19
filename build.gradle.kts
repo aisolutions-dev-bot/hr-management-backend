@@ -69,7 +69,7 @@ dependencies {
     testRuntimeOnly("com.mysql:mysql-connector-j:9.4.0")
 
     // MavenLocal
-    implementation("com.aisolutions:ai-solutions-java-shared:0.6.7")
+    implementation("com.aisolutions:ai-solutions-java-shared:0.6.8")
 
     // Google API Client Libraries
     implementation("com.google.api-client:google-api-client:2.8.0")
