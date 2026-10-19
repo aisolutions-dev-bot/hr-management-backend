@@ -38,6 +38,15 @@ public class StaffClaimDetailDTO {
 
     private BigDecimal exchangeRate;
 
+    /** Tax read off the receipt, display only: type (SST, GST, VAT or NO TAX), rate in percent, amount. */
+    private String taxType;
+    private BigDecimal taxRate;
+    private BigDecimal taxAmount;
+    /** Receipt amount before tax, in the receipt currency; the server works it out as receipt amount minus tax. */
+    private BigDecimal subTotal;
+    /** Service charge printed on the receipt, in the receipt currency; null when none. */
+    private BigDecimal serviceCharge;
+
     // Itemised approval (per-line)
     private String status;
     private String approvedBy;

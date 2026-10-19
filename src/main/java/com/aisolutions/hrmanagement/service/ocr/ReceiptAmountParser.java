@@ -117,7 +117,7 @@ public final class ReceiptAmountParser {
      * be a misread. Taken from the JDK's ISO 4217 data, so a currency added to
      * m01Currency later is covered without editing this class.
      */
-    private static boolean isZeroDecimal(String currency) {
+    static boolean isZeroDecimal(String currency) {
         if (currency == null || currency.isBlank()) return false;
         String code = currency.trim().toUpperCase();
         if (NO_MINOR_UNIT_IN_PRACTICE.contains(code)) return true;

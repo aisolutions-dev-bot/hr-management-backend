@@ -83,6 +83,25 @@ public class StaffClaimDetail {
     @Column(name = "ExchangeRate", precision = 18, scale = 10)
     private BigDecimal exchangeRate;
 
+    /** Tax name read off the receipt (SST, GST, VAT) or NO TAX; display only. */
+    @Column(name = "TaxType", length = 20)
+    private String taxType;
+
+    @Column(name = "TaxRate", precision = 7, scale = 2)
+    private BigDecimal taxRate;
+
+    /** Tax inside the receipt amount, in the receipt currency. */
+    @Column(name = "TaxAmount", precision = 18, scale = 2)
+    private BigDecimal taxAmount;
+
+    /** Receipt amount before tax (receipt amount minus tax amount), in the receipt currency. */
+    @Column(name = "SubTotal", precision = 18, scale = 2)
+    private BigDecimal subTotal;
+
+    /** Service charge printed on the receipt, in the receipt currency; null when none. */
+    @Column(name = "ServiceCharge", precision = 18, scale = 2)
+    private BigDecimal serviceCharge;
+
     // ── Itemised approval (per-line) ──
     /** PENDING (default) | APPROVED | REJECTED. */
     @Column(name = "Status", length = 20)

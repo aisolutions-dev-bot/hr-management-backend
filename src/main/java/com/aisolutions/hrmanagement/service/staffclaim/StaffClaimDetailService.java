@@ -51,6 +51,7 @@ public class StaffClaimDetailService {
     private static final int LEN_MERCHANT_NAME = 25;
     private static final int LEN_RECEIPT_NUMBER = 25;
     private static final int LEN_CURRENCY = 10;
+    private static final int LEN_TAX_TYPE = 20;
 
     @Inject StaffClaimDetailRepository claimRepo;
     @Inject AttachmentService attachmentService;
@@ -152,6 +153,11 @@ public class StaffClaimDetailService {
         e.setCurrency(StringNormalizer.truncate(conv.currencyCode(), LEN_CURRENCY));
         e.setDetectedCurrency(StringNormalizer.truncate(dto.getDetectedCurrency(), LEN_CURRENCY));
         e.setExchangeRate(conv.rateUsed());
+        e.setTaxType(StringNormalizer.truncate(dto.getTaxType(), LEN_TAX_TYPE));
+        e.setTaxRate(dto.getTaxRate());
+        e.setTaxAmount(dto.getTaxAmount());
+        e.setSubTotal(resolveSubTotal(dto.getSubTotal(), originalAmount, dto.getTaxAmount()));
+        e.setServiceCharge(dto.getServiceCharge());
     }
 
     // ─────────────────────────────────────────────────────────
@@ -236,6 +242,11 @@ public class StaffClaimDetailService {
         e.setCurrency(StringNormalizer.truncate(conv.currencyCode(), LEN_CURRENCY));
         e.setDetectedCurrency(StringNormalizer.truncate(dto.getDetectedCurrency(), LEN_CURRENCY));
         e.setExchangeRate(conv.rateUsed());
+        e.setTaxType(StringNormalizer.truncate(dto.getTaxType(), LEN_TAX_TYPE));
+        e.setTaxRate(dto.getTaxRate());
+        e.setTaxAmount(dto.getTaxAmount());
+        e.setSubTotal(resolveSubTotal(dto.getSubTotal(), originalAmount, dto.getTaxAmount()));
+        e.setServiceCharge(dto.getServiceCharge());
 
         // Link to the claim header + initial itemised-approval status
         e.setClaimId(dto.getClaimId());
@@ -251,6 +262,17 @@ public class StaffClaimDetailService {
     /** Public mapper used by {@link StaffClaimService} to render a claim's line items (no attachment lookup). */
     public StaffClaimDetailDTO toDtoBasic(StaffClaimDetail e) {
         return toDto(e, null, null);
+    }
+
+    /** The subtotal sent with the line when it is sensible, else the amount before tax; null when neither is known. */
+    private static BigDecimal resolveSubTotal(BigDecimal sent, BigDecimal total, BigDecimal tax) {
+        if (total == null) {
+            return null;
+        }
+        if (sent != null && sent.signum() > 0 && sent.compareTo(total) <= 0) {
+            return sent;
+        }
+        return tax == null ? null : total.subtract(tax);
     }
 
     private StaffClaimDetailDTO toDto(StaffClaimDetail e, Long attachmentId, String attachmentPath) {
@@ -270,6 +292,11 @@ public class StaffClaimDetailService {
         dto.setCurrency(e.getCurrency());
         dto.setDetectedCurrency(e.getDetectedCurrency());
         dto.setExchangeRate(e.getExchangeRate());
+        dto.setTaxType(e.getTaxType());
+        dto.setTaxRate(e.getTaxRate());
+        dto.setTaxAmount(e.getTaxAmount());
+        dto.setSubTotal(e.getSubTotal());
+        dto.setServiceCharge(e.getServiceCharge());
         dto.setStatus(e.getStatus());
         dto.setApprovedBy(e.getApprovedBy());
         dto.setApprovedDate(e.getApprovedDate());

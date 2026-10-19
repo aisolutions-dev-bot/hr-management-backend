@@ -63,6 +63,14 @@ public class ReceiptOcrService {
         "- currency: the ISO code of the receipt's currency (e.g. MYR, SGD, USD). " +
         "Use the symbol/code and any location or language cues. If it shows only a " +
         "bare \"$\" or you cannot tell, use null — do not guess.\n" +
+        "- taxType: the name of the sales tax printed on the receipt, such as SST, GST or VAT, " +
+        "or null if no tax is shown. Do not use a service charge or tip.\n" +
+        "- taxRate: that tax's rate as printed, such as \"6%\", or null if the rate is not printed. " +
+        "Copy the digits printed on this receipt; never fill in a country's usual rate from memory.\n" +
+        "- taxAmount: that tax's amount as printed, or null if it is not printed. " +
+        "Do not work out a tax figure that is not on the receipt.\n" +
+        "- subTotal: the sub-total printed before tax and any service charge, or null if not printed\n" +
+        "- serviceCharge: the service charge or service fee amount as printed (not a tip), or null if not printed\n" +
         "\n" +
         "Respond ONLY with this JSON structure (use null for fields not found):\n" +
         "{\n" +
@@ -71,7 +79,12 @@ public class ReceiptOcrService {
         "  \"receiptNumber\": \"...\",\n" +
         "  \"receiptDate\": \"...\",\n" +
         "  \"receiptAmount\": \"...\",\n" +
-        "  \"currency\": \"...\"\n" +
+        "  \"currency\": \"...\",\n" +
+        "  \"taxType\": \"...\",\n" +
+        "  \"taxRate\": \"...\",\n" +
+        "  \"taxAmount\": \"...\",\n" +
+        "  \"subTotal\": \"...\",\n" +
+        "  \"serviceCharge\": \"...\"\n" +
         "}";
 
     /**
@@ -167,6 +180,16 @@ public class ReceiptOcrService {
                             amtRaw, currency, amount.warning());
                 }
             }
+
+            var printedTax = new ReceiptTaxParser.Printed(getString(parsed, "taxType"),
+                    getString(parsed, "taxRate"), getString(parsed, "taxAmount"), getString(parsed, "subTotal"),
+                    getString(parsed, "serviceCharge"));
+            ReceiptTaxParser.Tax tax = ReceiptTaxParser.parse(printedTax, result.getReceiptAmount(), currency);
+            result.setTaxType(tax.type());
+            result.setTaxRate(tax.rate());
+            result.setTaxAmount(tax.amount());
+            result.setSubTotal(tax.subTotal());
+            result.setServiceCharge(tax.serviceCharge());
 
             result.setSuccess(true);
         } catch (Exception e) {

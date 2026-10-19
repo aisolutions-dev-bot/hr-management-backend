@@ -43,6 +43,21 @@ public class OcrReceiptResultDTO {
      */
     private String amountWarning;
 
+    /** Tax name as printed (SST, GST, VAT), or NO TAX when the receipt shows none. */
+    private String taxType;
+
+    /** Tax rate in percent, 0.00 when there is no tax. */
+    private BigDecimal taxRate;
+
+    /** Tax inside the receipt total, in the receipt currency, 0.00 when there is no tax. */
+    private BigDecimal taxAmount;
+
+    /** Subtotal before tax and service charge as printed; the total minus tax when it is not printed. */
+    private BigDecimal subTotal;
+
+    /** Service charge as printed, in the receipt currency; null when the receipt shows none. */
+    private BigDecimal serviceCharge;
+
     /** Raw text extracted by OCR (for debugging / audit) */
     private String rawText;
 

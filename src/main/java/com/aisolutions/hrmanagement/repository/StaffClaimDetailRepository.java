@@ -24,7 +24,7 @@ public class StaffClaimDetailRepository {
                 "SELECT UniqId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, ClaimId, " +
                 "StaffId, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
                 "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
-                "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason " +
+                "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason, TaxType, TaxRate, TaxAmount, SubTotal, ServiceCharge " +
                 "FROM m18StaffClaimsDet WHERE UniqId = ?")
             .execute(Tuple.tuple().addValue(id))
             .map(rows -> rows.iterator().hasNext() ? toEntity(rows.iterator().next()) : null);
@@ -36,7 +36,7 @@ public class StaffClaimDetailRepository {
                 "SELECT UniqId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, ClaimId, " +
                 "StaffId, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
                 "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
-                "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason " +
+                "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason, TaxType, TaxRate, TaxAmount, SubTotal, ServiceCharge " +
                 "FROM m18StaffClaimsDet WHERE StaffId = ? AND ClaimDate >= ? AND ClaimDate < ? " +
                 "ORDER BY ClaimDate DESC")
             .execute(Tuple.tuple().addValue(staffId).addValue(from).addValue(to))
@@ -48,7 +48,7 @@ public class StaffClaimDetailRepository {
                 "SELECT UniqId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, ClaimId, " +
                 "StaffId, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
                 "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
-                "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason " +
+                "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason, TaxType, TaxRate, TaxAmount, SubTotal, ServiceCharge " +
                 "FROM m18StaffClaimsDet WHERE StaffId = ? ORDER BY ClaimDate DESC")
             .execute(Tuple.tuple().addValue(staffId))
             .map(this::toList);
@@ -79,7 +79,7 @@ public class StaffClaimDetailRepository {
                 "SELECT UniqId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, ClaimId, " +
                 "StaffId, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
                 "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
-                "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason " +
+                "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason, TaxType, TaxRate, TaxAmount, SubTotal, ServiceCharge " +
                 "FROM m18StaffClaimsDet WHERE ClaimId = ? ORDER BY ClaimDate ASC, UniqId ASC")
             .execute(Tuple.tuple().addValue(claimId))
             .map(this::toList);
@@ -101,46 +101,8 @@ public class StaffClaimDetailRepository {
                 "INSERT INTO m18StaffClaimsDet (EntryStaff, EntryDate, LastEditStaff, LastEditDate, " +
                 "ClaimId, StaffId, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
                 "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
-                "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-            .execute(Tuple.tuple()
-                .addValue(entity.getEntryStaff())
-                .addValue(entity.getEntryDate())
-                .addValue(entity.getLastEditStaff())
-                .addValue(entity.getLastEditDate())
-                .addValue(entity.getClaimId())
-                .addValue(entity.getStaffId())
-                .addValue(entity.getProjectId())
-                .addValue(entity.getClaimType())
-                .addValue(entity.getClaimDate())
-                .addValue(entity.getClaimDescription())
-                .addValue(entity.getMerchantName())
-                .addValue(entity.getReceiptNumber())
-                .addValue(entity.getReceiptDate())
-                .addValue(entity.getReceiptAmount())
-                .addValue(entity.getClaimAmount())
-                .addValue(entity.getCurrency())
-                .addValue(entity.getDetectedCurrency())
-                .addValue(entity.getExchangeRate())
-                .addValue(entity.getStatus())
-                .addValue(entity.getApprovedBy())
-                .addValue(entity.getApprovedDate())
-                .addValue(entity.getRejectReason()))
-            .flatMap(result -> {
-                Long id = result.property(MySQLClient.LAST_INSERTED_ID);
-                entity.setUniqId(id);
-                return Uni.createFrom().item(entity);
-            });
-    }
-
-    public Uni<StaffClaimDetail> update(SqlClient client, StaffClaimDetail entity) {
-        return client.preparedQuery(
-                "UPDATE m18StaffClaimsDet SET EntryStaff = ?, EntryDate = ?, LastEditStaff = ?, " +
-                "LastEditDate = ?, ClaimId = ?, StaffId = ?, ProjectId = ?, ClaimType = ?, " +
-                "ClaimDate = ?, ClaimDescription = ?, MerchantName = ?, ReceiptNumber = ?, " +
-                "ReceiptDate = ?, ReceiptAmount = ?, ClaimAmount = ?, Currency = ?, " +
-                "DetectedCurrency = ?, ExchangeRate = ?, Status = ?, ApprovedBy = ?, " +
-                "ApprovedDate = ?, RejectReason = ? WHERE UniqId = ?")
+                "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason, TaxType, TaxRate, TaxAmount, SubTotal, ServiceCharge) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .execute(Tuple.tuple()
                 .addValue(entity.getEntryStaff())
                 .addValue(entity.getEntryDate())
@@ -164,6 +126,54 @@ public class StaffClaimDetailRepository {
                 .addValue(entity.getApprovedBy())
                 .addValue(entity.getApprovedDate())
                 .addValue(entity.getRejectReason())
+                .addValue(entity.getTaxType())
+                .addValue(entity.getTaxRate())
+                .addValue(entity.getTaxAmount())
+                .addValue(entity.getSubTotal())
+                .addValue(entity.getServiceCharge()))
+            .flatMap(result -> {
+                Long id = result.property(MySQLClient.LAST_INSERTED_ID);
+                entity.setUniqId(id);
+                return Uni.createFrom().item(entity);
+            });
+    }
+
+    public Uni<StaffClaimDetail> update(SqlClient client, StaffClaimDetail entity) {
+        return client.preparedQuery(
+                "UPDATE m18StaffClaimsDet SET EntryStaff = ?, EntryDate = ?, LastEditStaff = ?, " +
+                "LastEditDate = ?, ClaimId = ?, StaffId = ?, ProjectId = ?, ClaimType = ?, " +
+                "ClaimDate = ?, ClaimDescription = ?, MerchantName = ?, ReceiptNumber = ?, " +
+                "ReceiptDate = ?, ReceiptAmount = ?, ClaimAmount = ?, Currency = ?, " +
+                "DetectedCurrency = ?, ExchangeRate = ?, Status = ?, ApprovedBy = ?, " +
+                "ApprovedDate = ?, RejectReason = ?, TaxType = ?, TaxRate = ?, TaxAmount = ?, SubTotal = ?, ServiceCharge = ? WHERE UniqId = ?")
+            .execute(Tuple.tuple()
+                .addValue(entity.getEntryStaff())
+                .addValue(entity.getEntryDate())
+                .addValue(entity.getLastEditStaff())
+                .addValue(entity.getLastEditDate())
+                .addValue(entity.getClaimId())
+                .addValue(entity.getStaffId())
+                .addValue(entity.getProjectId())
+                .addValue(entity.getClaimType())
+                .addValue(entity.getClaimDate())
+                .addValue(entity.getClaimDescription())
+                .addValue(entity.getMerchantName())
+                .addValue(entity.getReceiptNumber())
+                .addValue(entity.getReceiptDate())
+                .addValue(entity.getReceiptAmount())
+                .addValue(entity.getClaimAmount())
+                .addValue(entity.getCurrency())
+                .addValue(entity.getDetectedCurrency())
+                .addValue(entity.getExchangeRate())
+                .addValue(entity.getStatus())
+                .addValue(entity.getApprovedBy())
+                .addValue(entity.getApprovedDate())
+                .addValue(entity.getRejectReason())
+                .addValue(entity.getTaxType())
+                .addValue(entity.getTaxRate())
+                .addValue(entity.getTaxAmount())
+                .addValue(entity.getSubTotal())
+                .addValue(entity.getServiceCharge())
                 .addValue(entity.getUniqId()))
             .map(v -> entity);
     }
@@ -207,6 +217,11 @@ public class StaffClaimDetailRepository {
         e.setApprovedBy(row.getString("ApprovedBy"));
         e.setApprovedDate(row.getLocalDateTime("ApprovedDate"));
         e.setRejectReason(row.getString("RejectReason"));
+        e.setTaxType(row.getString("TaxType"));
+        e.setTaxRate(row.getBigDecimal("TaxRate"));
+        e.setTaxAmount(row.getBigDecimal("TaxAmount"));
+        e.setSubTotal(row.getBigDecimal("SubTotal"));
+        e.setServiceCharge(row.getBigDecimal("ServiceCharge"));
         return e;
     }
 
