@@ -41,12 +41,15 @@ public class ReceiptOcrService {
     private static final String USER_PROMPT =
         "Extract the following fields from this receipt image:\n" +
         "- merchantName: the business/restaurant/store name\n" +
-        "- numbers: every number on the receipt that has a printed label such as \"Receipt No\", " +
-        "\"Invoice No\", \"Order No\", \"Ref No\", \"Table No\" or \"Pump No\", as a list " +
-        "of {label, value}. Copy each label and value exactly as printed. Leave out amounts, " +
-        "dates, times and phone numbers. Values can mix letters and digits, so copy every " +
+        "- numbers: every number or code on the receipt that has a printed label such as " +
+        "\"Receipt No\", \"Invoice No\", \"INV NO.\", \"Order No\", \"Ref No\", \"Table No\" or " +
+        "\"Pump No\", as a list of {label, value}. Copy each label and value exactly as printed. " +
+        "Leave out amounts, dates, times and phone numbers. Values can be codes that mix " +
+        "letters and digits (for example \"ac9bca\"), so copy every " +
         "character exactly and tell letters such as f, l, i and o apart from the digits 1 and 0. " +
         "If the same number is printed more than once, compare the copies and use the clearest.\n" +
+        "- receiptNumber: your single best choice of receipt, invoice, order or reference " +
+        "number, or null if the receipt only shows table, pump or queue numbers\n" +
         "- receiptDate: date of the receipt in yyyy-MM-dd format\n" +
         "- receiptAmount: the amount the customer actually paid, as a string: the Grand Total, " +
         "Net Total or Amount Paid after any discount, subsidy (e.g. BUDI95), voucher or rounding. When " +
@@ -65,6 +68,7 @@ public class ReceiptOcrService {
         "{\n" +
         "  \"merchantName\": \"...\",\n" +
         "  \"numbers\": [{\"label\": \"...\", \"value\": \"...\"}],\n" +
+        "  \"receiptNumber\": \"...\",\n" +
         "  \"receiptDate\": \"...\",\n" +
         "  \"receiptAmount\": \"...\",\n" +
         "  \"currency\": \"...\"\n" +
@@ -146,7 +150,8 @@ public class ReceiptOcrService {
             Map<String, Object> parsed = mapper.readValue(cleaned, Map.class);
 
             result.setMerchantName(getString(parsed, "merchantName"));
-            result.setReceiptNumber(ReceiptNumberPicker.pick(labelledNumbers(parsed.get("numbers"))));
+            String byLabel = ReceiptNumberPicker.pick(labelledNumbers(parsed.get("numbers")));
+            result.setReceiptNumber(byLabel != null ? byLabel : getString(parsed, "receiptNumber"));
             result.setReceiptDate(getString(parsed, "receiptDate"));
 
             String currency = getString(parsed, "currency");

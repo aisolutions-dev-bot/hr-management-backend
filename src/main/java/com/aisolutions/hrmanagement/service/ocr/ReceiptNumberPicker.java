@@ -44,7 +44,7 @@ public final class ReceiptNumberPicker {
         for (Pattern kind : KINDS) {
             for (LabelledNumber number : numbers) {
                 String value = clean(number.value());
-                if (value != null && hasDigit(value) && matches(kind, number.label())) {
+                if (value != null && matches(kind, number.label())) {
                     return value;
                 }
             }
@@ -58,10 +58,6 @@ public final class ReceiptNumberPicker {
         }
         String words = label.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", " ");
         return !EXCLUDED.matcher(words).find() && kind.matcher(words).find();
-    }
-
-    private static boolean hasDigit(String value) {
-        return value.chars().anyMatch(Character::isDigit);
     }
 
     /** Trims, collapses inner whitespace and drops a leading "#" or ":"; null for absent values. */

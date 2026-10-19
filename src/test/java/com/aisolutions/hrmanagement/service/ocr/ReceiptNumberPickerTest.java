@@ -75,6 +75,13 @@ class ReceiptNumberPickerTest {
     }
 
     @Test
+    @DisplayName("A code of letters and digits, or letters only, is accepted")
+    void lettersAndDigitCodes() {
+        assertEquals("ac9bca", ReceiptNumberPicker.pick(List.of(n("INV NO.", "ac9bca"))));
+        assertEquals("abcdef", ReceiptNumberPicker.pick(List.of(n("INV NO.", "abcdef"))));
+    }
+
+    @Test
     @DisplayName("An invoice date is not an invoice number")
     void invoiceDateIsIgnored() {
         assertNull(ReceiptNumberPicker.pick(List.of(n("Invoice Date", "07/09/2026"))));
