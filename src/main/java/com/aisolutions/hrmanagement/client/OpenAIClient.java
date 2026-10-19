@@ -97,8 +97,12 @@ public interface OpenAIClient {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     class ImageUrl {
         public String url;
+        public String detail;
         public ImageUrl() {}
-        public ImageUrl(String url) { this.url = url; }
+        public ImageUrl(String url) {
+            this.url = url;
+            this.detail = "high";
+        }
     }
 
     // ── Response ─────────────────────────────────────────────────────────

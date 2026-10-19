@@ -41,9 +41,17 @@ public class ReceiptOcrService {
     private static final String USER_PROMPT =
         "Extract the following fields from this receipt image:\n" +
         "- merchantName: the business/restaurant/store name\n" +
-        "- receiptNumber: receipt, invoice, order, or transaction number\n" +
+        "- numbers: every number on the receipt that has a printed label such as \"Receipt No\", " +
+        "\"Invoice No\", \"Order No\", \"Ref No\", \"Table No\" or \"Pump No\", as a list " +
+        "of {label, value}. Copy each label and value exactly as printed. Leave out amounts, " +
+        "dates, times and phone numbers. Values can mix letters and digits, so copy every " +
+        "character exactly and tell letters such as f, l, i and o apart from the digits 1 and 0. " +
+        "If the same number is printed more than once, compare the copies and use the clearest.\n" +
         "- receiptDate: date of the receipt in yyyy-MM-dd format\n" +
-        "- receiptAmount: the final total paid, as a string, transcribed exactly as it is " +
+        "- receiptAmount: the amount the customer actually paid, as a string: the Grand Total, " +
+        "Net Total or Amount Paid after any discount, subsidy (e.g. BUDI95), voucher or rounding. When " +
+        "several totals are printed, never use a gross or pre-discount total shown earlier. " +
+        "Transcribe it exactly as it is " +
         "printed. Keep the digits and separators you see and do not reformat, round, or " +
         "convert them. Both \".\" and \",\" are used as thousand separators depending on the " +
         "country, so \"1.275.750\" is one million two hundred seventy-five thousand — not " +
@@ -56,7 +64,7 @@ public class ReceiptOcrService {
         "Respond ONLY with this JSON structure (use null for fields not found):\n" +
         "{\n" +
         "  \"merchantName\": \"...\",\n" +
-        "  \"receiptNumber\": \"...\",\n" +
+        "  \"numbers\": [{\"label\": \"...\", \"value\": \"...\"}],\n" +
         "  \"receiptDate\": \"...\",\n" +
         "  \"receiptAmount\": \"...\",\n" +
         "  \"currency\": \"...\"\n" +
@@ -138,7 +146,7 @@ public class ReceiptOcrService {
             Map<String, Object> parsed = mapper.readValue(cleaned, Map.class);
 
             result.setMerchantName(getString(parsed, "merchantName"));
-            result.setReceiptNumber(getString(parsed, "receiptNumber"));
+            result.setReceiptNumber(ReceiptNumberPicker.pick(labelledNumbers(parsed.get("numbers"))));
             result.setReceiptDate(getString(parsed, "receiptDate"));
 
             String currency = getString(parsed, "currency");
@@ -163,6 +171,23 @@ public class ReceiptOcrService {
         }
 
         return result;
+    }
+
+    private List<ReceiptNumberPicker.LabelledNumber> labelledNumbers(Object raw) {
+        List<ReceiptNumberPicker.LabelledNumber> numbers = new java.util.ArrayList<>();
+        if (raw instanceof List<?> list) {
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> entry) {
+                    String label = text(entry.get("label"));
+                    numbers.add(new ReceiptNumberPicker.LabelledNumber(label, text(entry.get("value"))));
+                }
+            }
+        }
+        return numbers;
+    }
+
+    private String text(Object value) {
+        return value == null ? null : value.toString();
     }
 
     private String getString(Map<String, Object> map, String key) {
