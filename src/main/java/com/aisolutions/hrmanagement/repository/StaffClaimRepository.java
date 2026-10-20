@@ -19,7 +19,7 @@ import java.util.List;
 public class StaffClaimRepository {
 
     private static final String COLUMNS =
-            "UniqId, StaffId, ClaimStaffID, EntryStaff, EntryDate, LastEditStaff, LastEditDate, " +
+            "UniqId, StaffId, ClaimStaffID, ProjectId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, " +
             "ClaimPeriod, ClaimAmount, Status, SubmittedDate, ApprovedAmount, RejectedAmount";
 
     public Uni<StaffClaim> findById(SqlClient client, Long id) {
@@ -52,6 +52,21 @@ public class StaffClaimRepository {
     }
 
     /**
+     * The numbered open draft this staff entered for the same claimant and claim title, or null.
+     * A blank title matches only drafts with no title.
+     */
+    public Uni<StaffClaim> findOpenNumberedDraft(
+            SqlClient client, String staffId, String claimStaffId, String projectId, String claimNoLeadIn) {
+        return client.preparedQuery(
+                "SELECT " + COLUMNS + " FROM m18StaffClaims " +
+                "WHERE StaffId = ? AND ClaimStaffID = ? AND COALESCE(ProjectId, '') = ? " +
+                "AND Status = 'DRAFT' AND ClaimPeriod LIKE ? ORDER BY UniqId DESC LIMIT 1")
+            .execute(Tuple.tuple().addValue(staffId).addValue(claimStaffId).addValue(projectId)
+                .addValue(claimNoLeadIn + "%"))
+            .map(rows -> rows.iterator().hasNext() ? toEntity(rows.iterator().next()) : null);
+    }
+
+    /**
      * The staff member's claim header id for a period, any status, or null.
      */
     public Uni<Long> findIdByStaffAndPeriod(SqlClient client, String staffId, String period) {
@@ -64,13 +79,14 @@ public class StaffClaimRepository {
 
     public Uni<StaffClaim> save(SqlClient client, StaffClaim entity) {
         return client.preparedQuery(
-                "INSERT INTO m18StaffClaims (StaffId, ClaimStaffID, EntryStaff, EntryDate, " +
+                "INSERT INTO m18StaffClaims (StaffId, ClaimStaffID, ProjectId, EntryStaff, EntryDate, " +
                 "LastEditStaff, LastEditDate, ClaimPeriod, ClaimAmount, Status, SubmittedDate, " +
                 "ApprovedAmount, RejectedAmount) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .execute(Tuple.tuple()
                 .addValue(entity.getStaffId())
                 .addValue(entity.getClaimStaffId())
+                .addValue(entity.getProjectId())
                 .addValue(entity.getEntryStaff())
                 .addValue(entity.getEntryDate())
                 .addValue(entity.getLastEditStaff())
@@ -90,13 +106,14 @@ public class StaffClaimRepository {
 
     public Uni<StaffClaim> update(SqlClient client, StaffClaim entity) {
         return client.preparedQuery(
-                "UPDATE m18StaffClaims SET StaffId = ?, ClaimStaffID = ?, EntryStaff = ?, EntryDate = ?, " +
-                "LastEditStaff = ?, LastEditDate = ?, ClaimPeriod = ?, ClaimAmount = ?, " +
+                "UPDATE m18StaffClaims SET StaffId = ?, ClaimStaffID = ?, ProjectId = ?, EntryStaff = ?, " +
+                "EntryDate = ?, LastEditStaff = ?, LastEditDate = ?, ClaimPeriod = ?, ClaimAmount = ?, " +
                 "Status = ?, SubmittedDate = ?, ApprovedAmount = ?, RejectedAmount = ? " +
                 "WHERE UniqId = ?")
             .execute(Tuple.tuple()
                 .addValue(entity.getStaffId())
                 .addValue(entity.getClaimStaffId())
+                .addValue(entity.getProjectId())
                 .addValue(entity.getEntryStaff())
                 .addValue(entity.getEntryDate())
                 .addValue(entity.getLastEditStaff())
@@ -125,6 +142,7 @@ public class StaffClaimRepository {
         e.setStaffId(row.getString("StaffId"));
         String claimStaffId = row.getString("ClaimStaffID");
         e.setClaimStaffId(claimStaffId == null || claimStaffId.isBlank() ? e.getStaffId() : claimStaffId);
+        e.setProjectId(row.getString("ProjectId"));
         e.setEntryStaff(row.getString("EntryStaff"));
         e.setEntryDate(row.getLocalDateTime("EntryDate"));
         e.setLastEditStaff(row.getString("LastEditStaff"));

@@ -30,6 +30,8 @@ public class StaffClaimDTO {
     private String claimStaffId;
     /** Display name of {@link #claimStaffId}, set by the service when one claim is fetched. */
     private String claimStaffName;
+    /** Claim title: a project id or free text; empty when the claim has none. */
+    private String projectId;
 
     private String entryStaff;
     private LocalDateTime entryDate;

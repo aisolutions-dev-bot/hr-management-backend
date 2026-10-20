@@ -41,6 +41,13 @@ public class DocNoSeqRepository {
                 });
     }
 
+    /** The prefix configured for a module + screen without locking it, or null when not seeded. */
+    public Uni<String> findPrefix(SqlClient client, String moduleId, String screenType) {
+        return client.preparedQuery("SELECT Prefix FROM m01DocNoSeq WHERE ModuleId = ? AND ScreenType = ?")
+                .execute(Tuple.of(moduleId, screenType))
+                .map(rows -> rows.iterator().hasNext() ? rows.iterator().next().getString("Prefix") : null);
+    }
+
     /** The last sequence number issued for a bucket, or 0 when none yet. */
     public Uni<Long> findLastSeq(SqlClient client, Bucket bucket) {
         return client.preparedQuery(

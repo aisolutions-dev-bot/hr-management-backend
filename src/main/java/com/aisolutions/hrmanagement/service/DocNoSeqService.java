@@ -33,6 +33,13 @@ public class DocNoSeqService {
         return next(tx, CLAIM, period, actor);
     }
 
+    /** The claim number lead-in read from the configured prefix, e.g. {@code CLMD-}. */
+    public Uni<String> claimNoLeadIn(SqlClient client) {
+        return docNoSeqRepo
+                .findPrefix(client, CLAIM.moduleId(), CLAIM.screenType())
+                .map(prefix -> prefix == null ? "" : prefix + "-");
+    }
+
     private Uni<String> next(SqlClient tx, DocType type, YearMonth period, String actor) {
         return docNoSeqRepo
                 .findDefinitionForUpdate(tx, type.moduleId(), type.screenType())

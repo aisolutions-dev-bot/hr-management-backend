@@ -41,6 +41,10 @@ public class StaffClaim {
     @Column(name = "ClaimStaffID", length = 25)
     private String claimStaffId;
 
+    /** Claim title: a project id or free text; copied onto each receipt and locked there. Empty for older claims. */
+    @Column(name = "ProjectId", length = 25)
+    private String projectId;
+
     @Column(name = "EntryStaff", length = 25)
     private String entryStaff;
 

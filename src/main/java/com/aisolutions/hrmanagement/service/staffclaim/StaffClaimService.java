@@ -313,6 +313,13 @@ public class StaffClaimService {
                 }));
     }
 
+    /** True once the header carries a claim number instead of a month label. */
+    private static boolean isNumbered(StaffClaim h, String claimNoLeadIn) {
+        return !claimNoLeadIn.isEmpty()
+                && h.getClaimPeriod() != null
+                && h.getClaimPeriod().startsWith(claimNoLeadIn);
+    }
+
     private static boolean canView(StaffClaim h, String viewer) {
         if (viewer == null) return false;
         boolean owner = viewer.equalsIgnoreCase(h.getStaffId());
@@ -334,6 +341,9 @@ public class StaffClaimService {
 
         return requireDraft(headerId).flatMap(h -> {
             lineDto.setClaimId(headerId);
+            if (!StringNormalizer.isBlank(h.getProjectId())) {
+                lineDto.setProjectId(h.getProjectId());
+            }
             return detailService
                     .createClaim(lineDto, photoData, photoFileName, photoContentType)
                     .flatMap(saved -> recalcTotal(headerId).replaceWith(saved))
@@ -489,12 +499,13 @@ public class StaffClaimService {
                         .failure(new IllegalArgumentException(
                                 "Only a DRAFT claim can be submitted (current status: " + h.getStatus() + ")"));
             }
-            // Number the claim at submit from m01DocNoSeq (CLMD-202610-000001). Drafts keep the
-            // plain month (JULY-2026) so the get-or-create lookup still matches.
-            return docNoSeqService
-                    .nextClaimNo(tx, YearMonth.from(now), h.getStaffId())
-                    .flatMap(claimNo -> {
-                h.setClaimPeriod(claimNo);
+            // Month drafts (JULY-2026) are numbered here from m01DocNoSeq (CLMD-202610-000001);
+            // a draft created already numbered keeps its number.
+            Uni<String> claimNo = docNoSeqService.claimNoLeadIn(tx).flatMap(leadIn -> isNumbered(h, leadIn)
+                    ? Uni.createFrom().item(h.getClaimPeriod())
+                    : docNoSeqService.nextClaimNo(tx, YearMonth.from(now), h.getStaffId()));
+            return claimNo.flatMap(no -> {
+                h.setClaimPeriod(no);
                 h.setClaimAmount(total);
                 h.setStatus(STATUS_SUBMITTED);
                 h.setSubmittedDate(now);
@@ -1080,6 +1091,7 @@ public class StaffClaimService {
         dto.setUniqId(h.getUniqId());
         dto.setStaffId(h.getStaffId());
         dto.setClaimStaffId(h.getClaimStaffId());
+        dto.setProjectId(h.getProjectId());
         dto.setEntryStaff(h.getEntryStaff());
         dto.setEntryDate(h.getEntryDate());
         dto.setLastEditStaff(h.getLastEditStaff());
