@@ -1,5 +1,7 @@
 package com.aisolutions.hrmanagement.service.notification;
 
+import java.util.List;
+
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -24,9 +26,6 @@ public class StaffClaimNotificationNotifier {
 
     private static final Logger LOG = Logger.getLogger(StaffClaimNotificationNotifier.class);
 
-    /** m07SystemParameters key naming the staff who receives claim-submitted notifications. */
-    public static final String PARAM_HR_APPROVER = "HR-ADMIN-APPRV-IN-CHARGE";
-
     private static final String ALL_NOTIFICATION_CHANNELS = "all";
 
     @Inject
@@ -38,55 +37,57 @@ public class StaffClaimNotificationNotifier {
     @Inject
     SystemParameterService systemParameterService;
 
-    /**
-     * Stages the claim-submitted or claim-resubmitted content for the configured HR approver.
-     * Delegates parameter resolution to {@link SystemParameterService} and channel preparation to
-     * {@link #loadSubmittedClaimChannelToggles}.
-     */
-    public Uni<Void> notifyClaimSubmitted(NotificationTransaction context, StaffClaimDTO claim, String claimAction) {
-        return systemParameterService
-                .loadParameter(context.transaction(), PARAM_HR_APPROVER)
-                .flatMap(recipientStaffId ->
-                        loadSubmittedClaimChannelToggles(context, claim, claimAction, recipientStaffId));
-    }
-
-    /** Audits an absent approver or loads switches before delegating to {@link #queueClaimSubmittedChannels}. */
-    private Uni<Void> loadSubmittedClaimChannelToggles(
-            NotificationTransaction context, StaffClaimDTO claim, String claimAction, String recipientStaffId) {
-        if (isAbsent(recipientStaffId)) {
+    /** Stages the claim-submitted or claim-resubmitted content for each approver in {@code recipientStaffIds}. */
+    public Uni<Void> notifyClaimSubmitted(
+            NotificationTransaction context, StaffClaimDTO claim, String claimAction, List<String> recipientStaffIds) {
+        if (recipientStaffIds == null || recipientStaffIds.isEmpty()) {
             return recordNotificationSkip(
                     context, ALL_NOTIFICATION_CHANNELS, claim.getUniqId(), "approver_identifier_missing");
         }
         return notificationChannelDispatcher
                 .loadChannelToggles(context.transaction())
                 .flatMap(toggles -> queueClaimSubmittedChannels(
-                        new ClaimSubmittedDispatch(context, claim, claimAction, recipientStaffId, toggles)));
+                        new ClaimSubmittedBatch(context, claim, claimAction, recipientStaffIds, toggles)));
     }
 
-    /**
-     * Stages the claim-approved decision content for the claimant. Delegates tenant switches to
-     * {@link HrNotificationChannelDispatcher#loadChannelToggles} and staging to
-     * {@link #queueClaimApprovedChannels}.
-     */
-    public Uni<Void> notifyClaimApproved(NotificationTransaction context, StaffClaim claim) {
-        String claimantStaffId = resolveClaimantStaffId(claim);
-        if (isAbsent(claimantStaffId)) {
+    /** Stages the "accepted the rejection and continued" content for each approver the claim is back with. */
+    public Uni<Void> notifyClaimContinued(
+            NotificationTransaction context, StaffClaimDTO claim, List<String> recipientStaffIds) {
+        return notifyClaimSubmitted(
+                context, claim, StaffClaimNotificationContentRenderer.ACTION_CONTINUED, recipientStaffIds);
+    }
+
+    /** Stages the claim-approved decision content for each claimant-facing recipient in {@code claimantStaffIds}. */
+    public Uni<Void> notifyClaimApproved(
+            NotificationTransaction context, StaffClaim claim, List<String> claimantStaffIds) {
+        if (claimantStaffIds == null || claimantStaffIds.isEmpty()) {
             return recordNotificationSkip(
                     context, ALL_NOTIFICATION_CHANNELS, claim.getUniqId(), "claimant_identifier_missing");
         }
         return notificationChannelDispatcher
                 .loadChannelToggles(context.transaction())
-                .flatMap(toggles -> queueClaimApprovedChannels(context, claim, claimantStaffId, toggles));
+                .flatMap(toggles -> queueClaimApprovedChannels(context, claim, claimantStaffIds, toggles));
     }
 
-    /** Audits disabled channels or loads currency before {@link #loadSubmittedClaimApprover}. */
-    private Uni<Void> queueClaimSubmittedChannels(ClaimSubmittedDispatch dispatch) {
-        if (!dispatch.toggles().anyEnabled()) {
+    /** Audits disabled channels or loads currency before staging every pending approver. */
+    private Uni<Void> queueClaimSubmittedChannels(ClaimSubmittedBatch batch) {
+        if (!batch.toggles().anyEnabled()) {
             return recordNotificationSkip(
-                    dispatch.context(), "email,sms,whatsapp", dispatch.claim().getUniqId(), "channels_disabled");
+                    batch.context(), "email,sms,whatsapp", batch.claim().getUniqId(), "channels_disabled");
         }
-        return loadBaseCurrency(dispatch.context())
-                .flatMap(baseCurrency -> loadSubmittedClaimApprover(dispatch, baseCurrency));
+        return loadBaseCurrency(batch.context())
+                .flatMap(baseCurrency -> stageSubmittedClaimForEveryApprover(batch, baseCurrency));
+    }
+
+    /** Stages the submitted-claim content for every approver of the batch in turn. */
+    private Uni<Void> stageSubmittedClaimForEveryApprover(ClaimSubmittedBatch batch, String baseCurrency) {
+        Uni<Void> chain = Uni.createFrom().voidItem();
+        for (String recipientStaffId : batch.recipientStaffIds()) {
+            ClaimSubmittedDispatch dispatch = new ClaimSubmittedDispatch(
+                    batch.context(), batch.claim(), batch.claimAction(), recipientStaffId, batch.toggles());
+            chain = chain.flatMap(v -> loadSubmittedClaimApprover(dispatch, baseCurrency));
+        }
+        return chain;
     }
 
     /** Reads the approver and delegates content preparation to {@link #stageSubmittedClaimForApprover}. */
@@ -131,17 +132,29 @@ public class StaffClaimNotificationNotifier {
                         dispatch.claim().getUniqId()));
     }
 
-    /** Audits disabled channels or loads currency before {@link #loadApprovedClaimant}. */
+    /** Audits disabled channels or loads currency before staging every claimant-facing recipient. */
     private Uni<Void> queueClaimApprovedChannels(
             NotificationTransaction context,
             StaffClaim claim,
-            String claimantStaffId,
+            List<String> claimantStaffIds,
             HrNotificationChannelToggles toggles) {
         if (!toggles.anyEnabled()) {
             return recordNotificationSkip(context, "email,sms,whatsapp", claim.getUniqId(), "channels_disabled");
         }
-        ClaimApprovedDispatch dispatch = new ClaimApprovedDispatch(context, claim, claimantStaffId, toggles);
-        return loadBaseCurrency(context).flatMap(baseCurrency -> loadApprovedClaimant(dispatch, baseCurrency));
+        ClaimApprovedBatch batch = new ClaimApprovedBatch(context, claim, claimantStaffIds, toggles);
+        return loadBaseCurrency(context)
+                .flatMap(baseCurrency -> stageApprovedClaimForEveryRecipient(batch, baseCurrency));
+    }
+
+    /** Stages the approved-claim content for every claimant-facing recipient of the batch in turn. */
+    private Uni<Void> stageApprovedClaimForEveryRecipient(ClaimApprovedBatch batch, String baseCurrency) {
+        Uni<Void> chain = Uni.createFrom().voidItem();
+        for (String claimantStaffId : batch.claimantStaffIds()) {
+            ClaimApprovedDispatch dispatch =
+                    new ClaimApprovedDispatch(batch.context(), batch.claim(), claimantStaffId, batch.toggles());
+            chain = chain.flatMap(v -> loadApprovedClaimant(dispatch, baseCurrency));
+        }
+        return chain;
     }
 
     /** Reads claimant staff and delegates rendering to {@link #stageApprovedClaimContent}. */
@@ -189,11 +202,6 @@ public class StaffClaimNotificationNotifier {
         return staffRepository.findNameByStaffId(context.transaction(), staffId);
     }
 
-    /** The claimant-facing staff id: the recorded entry staff, else the owning staff. */
-    private String resolveClaimantStaffId(StaffClaim claim) {
-        return claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
-    }
-
     /** The submitting staff id: the recorded entry staff, else the owning staff. */
     private String resolveSubmitterStaffId(StaffClaimDTO claim) {
         return claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
@@ -208,10 +216,20 @@ public class StaffClaimNotificationNotifier {
         return Uni.createFrom().voidItem();
     }
 
-    /** Identifies absent staff identifiers and contacts. */
-    private boolean isAbsent(String value) {
-        return value == null || value.isBlank();
-    }
+    /** One submitted or resubmitted claim with every approver to stage and the channel switches. */
+    private record ClaimSubmittedBatch(
+            NotificationTransaction context,
+            StaffClaimDTO claim,
+            String claimAction,
+            List<String> recipientStaffIds,
+            HrNotificationChannelToggles toggles) {}
+
+    /** One approved claim with every claimant-facing recipient to stage and the channel switches. */
+    private record ClaimApprovedBatch(
+            NotificationTransaction context,
+            StaffClaim claim,
+            List<String> claimantStaffIds,
+            HrNotificationChannelToggles toggles) {}
 
     /** The claim context carried from the approver parameter read into content staging. */
     private record ClaimSubmittedDispatch(

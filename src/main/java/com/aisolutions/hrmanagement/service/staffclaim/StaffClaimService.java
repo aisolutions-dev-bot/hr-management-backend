@@ -515,11 +515,15 @@ public class StaffClaimService {
         });
     }
 
-    /** Delegates claim-submitted envelope staging to {@link StaffClaimNotificationNotifier}. */
+    /** Stages claim-submitted email/SMS/WhatsApp for the same flow-aware recipients the bell notifies. */
     private Uni<Void> stageClaimSubmittedNotification(
             SqlClient tx, StaffClaimDTO claim, String claimAction, String companyId) {
-        return staffClaimNotificationNotifier.notifyClaimSubmitted(
-                new NotificationTransaction(tx, resolveNotificationCompanyId(companyId)), claim, claimAction);
+        return resolveSubmitRecipients(tx, claim.getUniqId())
+                .flatMap(recipients -> staffClaimNotificationNotifier.notifyClaimSubmitted(
+                        new NotificationTransaction(tx, resolveNotificationCompanyId(companyId)),
+                        claim,
+                        claimAction,
+                        recipients));
     }
 
     /**
@@ -681,7 +685,8 @@ public class StaffClaimService {
                                 line.setLastEditDate(now);
                                 return detailRepo.update(tx, line);
                             })
-                            .flatMap(updated -> stageClaimResubmittedNotification(tx, headerId, companyId)
+                            .flatMap(updated -> restartReturnedFlowIfResolved(tx, headerId, actor)
+                                    .flatMap(ignored -> stageClaimResubmittedNotification(tx, headerId, companyId))
                                     .replaceWith(updated))))
                     .flatMap(v -> recalcAndRollup(headerId, actor))
                     .flatMap(h -> getWithLines(headerId))
@@ -696,16 +701,28 @@ public class StaffClaimService {
         });
     }
 
-    /** Resolves the claim header and delegates resubmitted content staging to StaffClaimNotificationNotifier. */
+    /** Restarts a returned claim's approval at the first tier once no rejected receipt is left. */
+    private Uni<Void> restartReturnedFlowIfResolved(SqlClient tx, Long headerId, String actor) {
+        return detailRepo.findByHeaderId(tx, headerId).flatMap(lines -> hasRejectedReceipt(lines)
+                ? Uni.createFrom().voidItem()
+                : claimApprovalFlowService.restartIfReturned(tx, headerId, actor, DateUtil.nowSGT()));
+    }
+
+    /** Reports whether any receipt of the claim is still rejected (the claim is not yet re-submittable). */
+    private boolean hasRejectedReceipt(List<StaffClaimDetail> lines) {
+        return lines.stream().anyMatch(l -> LINE_REJECTED.equalsIgnoreCase(l.getStatus()));
+    }
+
+    /** Stages claim-resubmitted email/SMS/WhatsApp for the same flow-aware recipients the bell notifies. */
     private Uni<Void> stageClaimResubmittedNotification(SqlClient tx, Long headerId, String companyId) {
-        return headerRepo
-                .findById(tx, headerId)
-                .flatMap(header -> header == null
-                        ? Uni.createFrom().voidItem()
-                        : staffClaimNotificationNotifier.notifyClaimSubmitted(
+        return headerRepo.findById(tx, headerId).flatMap(header -> header == null
+                ? Uni.createFrom().voidItem()
+                : resolveSubmitRecipients(tx, headerId)
+                        .flatMap(recipients -> staffClaimNotificationNotifier.notifyClaimSubmitted(
                                 new NotificationTransaction(tx, resolveNotificationCompanyId(companyId)),
                                 toHeaderDto(header, null),
-                                "resubmitted"));
+                                "resubmitted",
+                                recipients)));
     }
 
     /**
@@ -746,8 +763,9 @@ public class StaffClaimService {
                                                     fresh.setLastEditDate(now);
                                                     return detailRepo.update(tx, fresh);
                                                 })
-                                                .flatMap(updated -> stageClaimResubmittedNotification(
-                                                                tx, headerId, companyId)
+                                                .flatMap(updated -> restartReturnedFlowIfResolved(tx, headerId, actor)
+                                                        .flatMap(ignored -> stageClaimResubmittedNotification(
+                                                                tx, headerId, companyId))
                                                         .replaceWith(updated)))));
                     })
                     .flatMap(saved -> applyPhotoChange(lineId, photoData, photoFileName, photoContentType)
@@ -830,8 +848,12 @@ public class StaffClaimService {
                             pending++;
                         }
                     }
+                    // With every receipt voided no tier has anything to approve, so the claim ends VOIDED at once.
+                    final boolean allVoided = voided > 0 && approved == 0 && rejected == 0 && pending == 0;
                     final String newStatus;
-                    if (pending > 0 || holdInReview) {
+                    if (allVoided) {
+                        newStatus = STATUS_VOIDED;
+                    } else if (pending > 0 || holdInReview) {
                         newStatus = STATUS_SUBMITTED; // back under review
                     } else if (approved > 0 && rejected > 0) {
                         newStatus = STATUS_PARTIAL;
@@ -844,7 +866,8 @@ public class StaffClaimService {
                     } else {
                         newStatus = STATUS_SUBMITTED;
                     }
-                    final BigDecimal frozenApproved = (pending > 0 || holdInReview) ? null : approvedAmt;
+                    final boolean stillInReview = !allVoided && (pending > 0 || holdInReview);
+                    final BigDecimal frozenApproved = stillInReview ? null : approvedAmt;
                     final BigDecimal frozenRejected = rejectedAmt;
                     final boolean allRejectedResolved = rejected == 0;
                     // A void can turn a partially-approved claim (its last rejected receipt struck
@@ -853,6 +876,8 @@ public class StaffClaimService {
                     // SUBMITTED), so the new status alone is a safe transition signal here.
                     final boolean becameApproved = STATUS_APPROVED.equals(newStatus);
                     String companyId = currentUserService.getCurrentCompanyId();
+                    // Set when the claim was halted by a tier reject and has now resumed with that tier.
+                    final boolean[] continuedWithApprover = {false};
                     return pool.withTransaction(tx -> headerRepo
                                     .findById(tx, headerId)
                                     .flatMap(h -> {
@@ -870,14 +895,24 @@ public class StaffClaimService {
                                     .flatMap(saved -> allRejectedResolved && saved != null
                                             ? claimApprovalFlowService
                                                     .resumeIfReturned(tx, headerId, actor, DateUtil.nowSGT())
+                                                    .invoke(resumed -> continuedWithApprover[0] =
+                                                            resumed && STATUS_SUBMITTED.equals(newStatus))
                                                     .replaceWith(saved)
                                             : Uni.createFrom().item(saved))
                                     .flatMap(saved -> (becameApproved && saved != null)
                                             ? stageClaimApprovedNotification(tx, saved, companyId)
                                                     .replaceWith(saved)
+                                            : Uni.createFrom().item(saved))
+                                    // The claim carries on after the accepted rejection: tell the approver(s).
+                                    .flatMap(saved -> (continuedWithApprover[0] && saved != null)
+                                            ? stageClaimContinuedNotification(tx, saved, companyId)
+                                                    .replaceWith(saved)
                                             : Uni.createFrom().item(saved)))
                             .call(saved -> (becameApproved && saved != null)
                                     ? notifyClaimApproved(saved)
+                                    : Uni.createFrom().voidItem())
+                            .call(saved -> (continuedWithApprover[0] && saved != null)
+                                    ? notifyClaimContinued(saved)
                                     : Uni.createFrom().voidItem());
                 })));
     }
@@ -885,7 +920,9 @@ public class StaffClaimService {
     /** Delegates the claim-approved outbox staging to {@link StaffClaimNotificationNotifier}. */
     private Uni<Void> stageClaimApprovedNotification(SqlClient tx, StaffClaim claim, String companyId) {
         return staffClaimNotificationNotifier.notifyClaimApproved(
-                new NotificationTransaction(tx, resolveNotificationCompanyId(companyId)), claim);
+                new NotificationTransaction(tx, resolveNotificationCompanyId(companyId)),
+                claim,
+                claimantRecipients(claim));
     }
 
     private BigDecimal sumClaimAmount(List<StaffClaimDetail> lines) {
@@ -1011,22 +1048,93 @@ public class StaffClaimService {
                 .recoverWithItem((Void) null);
     }
 
-    /** Notifies the claimant that their claim is wholly approved. */
+    /** Stages email/SMS/WhatsApp to the approver(s) the claim is back with after an accepted rejection. */
+    private Uni<Void> stageClaimContinuedNotification(SqlClient tx, StaffClaim claim, String companyId) {
+        return resolveSubmitRecipients(tx, claim.getUniqId())
+                .flatMap(recipients -> staffClaimNotificationNotifier.notifyClaimContinued(
+                        new NotificationTransaction(tx, resolveNotificationCompanyId(companyId)),
+                        toHeaderDto(claim, null),
+                        recipients));
+    }
+
+    /** In-app bell to the approver(s) the claim is back with after the claimant accepted a rejection. */
+    private Uni<Void> notifyClaimContinued(StaffClaim claim) {
+        String submitter = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
+        return companyPoolManager
+                .poolFor(currentUserService.getCurrentCompanyId())
+                .flatMap(pool -> resolveSubmitRecipients(pool, claim.getUniqId()).flatMap(recipients -> {
+                    if (recipients.isEmpty()) {
+                        return Uni.createFrom().voidItem();
+                    }
+                    return staffRepo
+                            .findNameByStaffId(pool, submitter)
+                            .onFailure()
+                            .recoverWithItem((String) null)
+                            .flatMap(name -> {
+                                String who = (name != null && !name.isBlank()) ? name : submitter;
+                                String subject = "Claim updated by " + who + " - " + nz(claim.getClaimPeriod());
+                                String desc = who + " has accepted the rejection and continued claim "
+                                        + nz(claim.getClaimPeriod()) + " for your approval.";
+                                Uni<Void> chain = Uni.createFrom().voidItem();
+                                for (String recipient : recipients) {
+                                    chain = chain.flatMap(v -> createNotification(
+                                            NOTIF_TYPE_ADMIN,
+                                            subject,
+                                            desc,
+                                            recipient,
+                                            submitter,
+                                            refOf(claim.getUniqId())));
+                                }
+                                return chain;
+                            });
+                }))
+                .onFailure()
+                .recoverWithItem((Void) null);
+    }
+
+    /** Notifies the claimant and the keyer-in, de-duplicated, that the claim is wholly approved. */
     private Uni<Void> notifyClaimApproved(StaffClaim claim) {
-        String claimant = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
-        if (claimant == null || claimant.isBlank()) {
+        List<String> recipients = claimantRecipients(claim);
+        if (recipients.isEmpty()) {
             return Uni.createFrom().voidItem();
         }
+        String submitter = claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId();
         return loadBaseCurrencySafe()
                 .flatMap(baseCcy -> {
                     String subject = "Your " + nz(claim.getClaimPeriod()) + " claim is approved.";
                     String desc = "Your claim for " + nz(claim.getClaimPeriod())
                             + " of amount " + money(baseCcy, claim.getClaimAmount())
                             + " submitted on " + ts(claim.getSubmittedDate()) + " is being approved.";
-                    return createNotification(NOTIF_TYPE, subject, desc, claimant, claimant, refOf(claim.getUniqId()));
+                    Uni<Void> chain = Uni.createFrom().voidItem();
+                    for (String recipient : recipients) {
+                        chain = chain.flatMap(v -> createNotification(
+                                NOTIF_TYPE, subject, desc, recipient, submitter, refOf(claim.getUniqId())));
+                    }
+                    return chain;
                 })
                 .onFailure()
                 .recoverWithItem((Void) null);
+    }
+
+    /** The claimant (ClaimStaffId) and the keyer-in (entry staff), de-duplicated; they differ on claim-on-behalf. */
+    private static List<String> claimantRecipients(StaffClaim claim) {
+        List<String> recipients = new ArrayList<>();
+        addRecipient(recipients, claim.getClaimStaffId());
+        addRecipient(recipients, claim.getEntryStaff() != null ? claim.getEntryStaff() : claim.getStaffId());
+        return recipients;
+    }
+
+    /** Adds a staff id when present and not already listed (case-insensitive). */
+    private static void addRecipient(List<String> recipients, String staffId) {
+        if (staffId == null || staffId.isBlank()) {
+            return;
+        }
+        for (String existing : recipients) {
+            if (existing.equalsIgnoreCase(staffId)) {
+                return;
+            }
+        }
+        recipients.add(staffId);
     }
 
     private Uni<Void> createNotification(

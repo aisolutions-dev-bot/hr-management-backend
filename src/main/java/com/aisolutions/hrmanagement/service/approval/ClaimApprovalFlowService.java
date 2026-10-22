@@ -36,6 +36,7 @@ public class ClaimApprovalFlowService {
     private static final String STATUS_PENDING = "PENDING";
     private static final String ACT_REJECT = "REJECT";
     private static final String ACT_RESUME = "RESUME";
+    private static final String ACT_RESTART = "RESTART";
 
     @Inject
     ApprovalFlowRepository flowRepo;
@@ -54,24 +55,42 @@ public class ClaimApprovalFlowService {
                                 !snap.tiers().isEmpty(), snap.mode(), snap.tiers(), effective(actions))));
     }
 
-    /** The action log with RESUME markers applied: a REJECT before the latest RESUME no longer halts the flow. */
+    /** The action log with return markers applied: RESTART drops everything before it, RESUME only the REJECT. */
     public static List<Action> effective(List<Action> actions) {
-        int lastResume = -1;
+        int lastRestart = lastMarkerIndex(actions, ACT_RESTART);
+        List<Action> surviving = lastRestart < 0 ? actions : actions.subList(lastRestart + 1, actions.size());
+        return withoutHaltMarkers(surviving);
+    }
+
+    /** The index of the last occurrence of one marker, or -1 when the log holds no such marker. */
+    private static int lastMarkerIndex(List<Action> actions, String marker) {
+        int found = -1;
         for (int i = 0; i < actions.size(); i++) {
-            if (ACT_RESUME.equalsIgnoreCase(actions.get(i).action())) {
-                lastResume = i;
+            if (marker.equalsIgnoreCase(actions.get(i).action())) {
+                found = i;
             }
         }
+        return found;
+    }
+
+    /** Drops the marker rows and any REJECT that the latest RESUME has already reopened. */
+    private static List<Action> withoutHaltMarkers(List<Action> actions) {
+        int lastResume = lastMarkerIndex(actions, ACT_RESUME);
         List<Action> out = new ArrayList<>();
         for (int i = 0; i < actions.size(); i++) {
-            Action a = actions.get(i);
-            boolean marker = ACT_RESUME.equalsIgnoreCase(a.action());
-            boolean reopened = ACT_REJECT.equalsIgnoreCase(a.action()) && i < lastResume;
+            Action action = actions.get(i);
+            boolean marker = isMarker(action.action());
+            boolean reopened = ACT_REJECT.equalsIgnoreCase(action.action()) && i < lastResume;
             if (!marker && !reopened) {
-                out.add(a);
+                out.add(action);
             }
         }
         return out;
+    }
+
+    /** Reports whether one action row is a flow marker rather than an approver decision. */
+    private static boolean isMarker(String action) {
+        return ACT_RESUME.equalsIgnoreCase(action) || ACT_RESTART.equalsIgnoreCase(action);
     }
 
     /** True when every frozen tier has approved the claim (an unfinished flow keeps it in review). */
@@ -79,11 +98,21 @@ public class ClaimApprovalFlowService {
         return !flow.active() || ApprovalFlowService.isFullyApproved(flow.tiers(), flow.actions());
     }
 
-    /** Logs a RESUME marker when a tier REJECT has halted the claim's flow, so that tier is pending again. */
-    public Uni<Void> resumeIfReturned(SqlClient tx, long claimId, String actor, LocalDateTime now) {
+    /** Logs a RESUME marker when a tier REJECT halted the flow; emits whether one was logged. */
+    public Uni<Boolean> resumeIfReturned(SqlClient tx, long claimId, String actor, LocalDateTime now) {
         return resolve(tx, claimId)
                 .flatMap(flow -> flow.active() && ApprovalFlowService.isRejected(flow.actions())
                         ? flowRepo.insertAction(tx, MODULE_ID, SCREEN_TYPE, claimId, null, ACT_RESUME, null, actor, now)
+                                .replaceWith(true)
+                        : Uni.createFrom().item(false));
+    }
+
+    /** Logs a RESTART marker when a returned claim is resubmitted; no-op unless a tier REJECT halted the flow. */
+    public Uni<Void> restartIfReturned(SqlClient tx, long claimId, String actor, LocalDateTime now) {
+        return resolve(tx, claimId)
+                .flatMap(flow -> flow.active() && ApprovalFlowService.isRejected(flow.actions())
+                        ? flowRepo.insertAction(
+                                tx, MODULE_ID, SCREEN_TYPE, claimId, null, ACT_RESTART, null, actor, now)
                         : Uni.createFrom().voidItem());
     }
 

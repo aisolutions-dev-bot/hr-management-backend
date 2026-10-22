@@ -17,6 +17,12 @@ final class StaffClaimNotificationContentRenderer {
     private static final String TEMPLATE_LANGUAGE_CODE = "en";
     private static final String CLAIM_SUBMITTED_TEMPLATE_NAME = "hr_claim_submitted_v1";
     private static final String CLAIM_DECISION_TEMPLATE_NAME = "hr_claim_decision_v1";
+    private static final String CLAIM_CONTINUED_TEMPLATE_NAME = "hr_claim_continued_v1";
+
+    /** The claim action that selects the "claimant accepted the rejection and continued" template. */
+    static final String ACTION_CONTINUED = "continued";
+
+    private static final String CONTINUED_ACTION_TEXT = "accepted the rejection and continued";
 
     /** Prevents instances of the stateless parameter factory. */
     private StaffClaimNotificationContentRenderer() {}
@@ -33,6 +39,11 @@ final class StaffClaimNotificationContentRenderer {
         parameters.put("claimant_name", whatsappValue(summary.claimantName()));
         parameters.put("claim_period", whatsappValue(summary.claimPeriod()));
         parameters.put("amount", whatsappValue(summary.amount()));
+        if (ACTION_CONTINUED.equals(request.claimAction())) {
+            // Only the WhatsApp descriptor reads this: it reuses the approved submitted template's {{action}}.
+            parameters.put("action", CONTINUED_ACTION_TEXT);
+            return new ClaimNotificationContent(CLAIM_CONTINUED_TEMPLATE_NAME, parameters);
+        }
         parameters.put("action", whatsappValue(nz(request.claimAction())));
         return new ClaimNotificationContent(CLAIM_SUBMITTED_TEMPLATE_NAME, parameters);
     }

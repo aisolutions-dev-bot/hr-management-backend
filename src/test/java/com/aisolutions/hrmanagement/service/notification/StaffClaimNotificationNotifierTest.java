@@ -1,6 +1,7 @@
 package com.aisolutions.hrmanagement.service.notification;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Map;
 
 import com.aisolutions.hrmanagement.dto.StaffClaimDTO;
@@ -17,7 +18,6 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -49,19 +49,14 @@ class StaffClaimNotificationNotifierTest {
     private static final String CLAIM_DECISION_TEMPLATE_NAME = "hr_claim_decision_v1";
     private static final String NOTIFICATION_LANGUAGE = "en";
 
-    /** A failed approver parameter lookup aborts staging so the business transaction can roll back. */
+    /** An empty recipient list (no flow tier, no fallback approver) skips every channel. */
     @Test
-    void propagatesApproverParameterLookupFailure() {
-        when(systemParameterService.loadParameter(
-                        any(SqlClient.class), eq(StaffClaimNotificationNotifier.PARAM_HR_APPROVER)))
-                .thenReturn(Uni.createFrom().failure(new IllegalStateException("parameter database unavailable")));
+    void skipsEveryChannelWhenNoRecipientIsResolved() {
+        notifier()
+                .notifyClaimSubmitted(context(), claimDto(), CLAIM_ACTION_SUBMITTED, List.of())
+                .await()
+                .indefinitely();
 
-        assertThrows(
-                IllegalStateException.class,
-                () -> notifier()
-                        .notifyClaimSubmitted(context(), claimDto(), CLAIM_ACTION_SUBMITTED)
-                        .await()
-                        .indefinitely());
         verify(notificationPublisher, never())
                 .enqueueEmailTemplate(
                         any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
@@ -79,7 +74,6 @@ class StaffClaimNotificationNotifierTest {
     /** Stages only the email channel for a submitted claim when SMS and WhatsApp are off. */
     @Test
     void stagesOnlyEmailForClaimSubmittedWhenOtherChannelsAreOff() {
-        stubApproverParameter(APPROVER_ID);
         stubChannelSwitches(true, false, false);
         stubBaseCurrency(BASE_CURRENCY);
         stubStaffLookup(APPROVER_ID, approver());
@@ -87,7 +81,7 @@ class StaffClaimNotificationNotifierTest {
         stubPublisherSuccess();
 
         notifier()
-                .notifyClaimSubmitted(context(), claimDto(), CLAIM_ACTION_SUBMITTED)
+                .notifyClaimSubmitted(context(), claimDto(), CLAIM_ACTION_SUBMITTED, List.of(APPROVER_ID))
                 .await()
                 .indefinitely();
 
@@ -110,10 +104,9 @@ class StaffClaimNotificationNotifierTest {
                         any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
     }
 
-    /** Stages the resubmitted subject for a claim whose receipt was resubmitted. */
+    /** A claim the claimant accepted the rejection of goes out on the dedicated "continued" template. */
     @Test
-    void stagesResubmittedSubjectForClaimResubmitted() {
-        stubApproverParameter(APPROVER_ID);
+    void stagesContinuedTemplateWhenClaimantAcceptedTheRejection() {
         stubChannelSwitches(true, false, false);
         stubBaseCurrency(BASE_CURRENCY);
         stubStaffLookup(APPROVER_ID, approver());
@@ -121,7 +114,34 @@ class StaffClaimNotificationNotifierTest {
         stubPublisherSuccess();
 
         notifier()
-                .notifyClaimSubmitted(context(), claimDto(), CLAIM_ACTION_RESUBMITTED)
+                .notifyClaimContinued(context(), claimDto(), List.of(APPROVER_ID))
+                .await()
+                .indefinitely();
+
+        verify(notificationPublisher)
+                .enqueueEmailTemplate(
+                        any(NotificationTransaction.class),
+                        eq(APPROVER_EMAIL),
+                        eq("hr_claim_continued_v1"),
+                        eq(NOTIFICATION_LANGUAGE),
+                        argThat((Map<String, Object> parameters) ->
+                                parameters.get("claimant_name").equals(SUBMITTER_NAME)
+                                        && parameters.get("claim_period").equals(CLAIM_PERIOD)
+                                        && parameters.get("amount").equals("SGD 128.00")
+                                        && parameters.get("action").equals("accepted the rejection and continued")));
+    }
+
+    /** Stages the resubmitted subject for a claim whose receipt was resubmitted. */
+    @Test
+    void stagesResubmittedSubjectForClaimResubmitted() {
+        stubChannelSwitches(true, false, false);
+        stubBaseCurrency(BASE_CURRENCY);
+        stubStaffLookup(APPROVER_ID, approver());
+        stubSubmitterName(SUBMITTER_ID, SUBMITTER_NAME);
+        stubPublisherSuccess();
+
+        notifier()
+                .notifyClaimSubmitted(context(), claimDto(), CLAIM_ACTION_RESUBMITTED, List.of(APPROVER_ID))
                 .await()
                 .indefinitely();
 
@@ -135,6 +155,45 @@ class StaffClaimNotificationNotifierTest {
                                 parameters.get("action").equals(CLAIM_ACTION_RESUBMITTED)));
     }
 
+    /** Stages every channel for EACH pending approver when the active flow has more than one tier member. */
+    @Test
+    void stagesEveryChannelForEachPendingApproverUnderAnActiveFlow() {
+        String secondApproverId = "APPROVER-2";
+        String secondApproverEmail = "approver2@example.com";
+        stubChannelSwitches(true, false, false);
+        stubBaseCurrency(BASE_CURRENCY);
+        stubStaffLookup(APPROVER_ID, approver());
+        Staff secondApprover = new Staff();
+        secondApprover.setStaffId(secondApproverId);
+        secondApprover.setName("Carl");
+        secondApprover.setEmailCompany(secondApproverEmail);
+        secondApprover.setTelMobile(APPROVER_MOBILE);
+        stubStaffLookup(secondApproverId, secondApprover);
+        stubSubmitterName(SUBMITTER_ID, SUBMITTER_NAME);
+        stubPublisherSuccess();
+
+        notifier()
+                .notifyClaimSubmitted(
+                        context(), claimDto(), CLAIM_ACTION_SUBMITTED, List.of(APPROVER_ID, secondApproverId))
+                .await()
+                .indefinitely();
+
+        verify(notificationPublisher)
+                .enqueueEmailTemplate(
+                        any(NotificationTransaction.class),
+                        eq(APPROVER_EMAIL),
+                        eq(CLAIM_SUBMITTED_TEMPLATE_NAME),
+                        eq(NOTIFICATION_LANGUAGE),
+                        anyMap());
+        verify(notificationPublisher)
+                .enqueueEmailTemplate(
+                        any(NotificationTransaction.class),
+                        eq(secondApproverEmail),
+                        eq(CLAIM_SUBMITTED_TEMPLATE_NAME),
+                        eq(NOTIFICATION_LANGUAGE),
+                        anyMap());
+    }
+
     /** Stages the approved decision template for the claimant when WhatsApp is the only channel on. */
     @Test
     void stagesApprovedDecisionWhatsappForClaimant() {
@@ -143,7 +202,10 @@ class StaffClaimNotificationNotifierTest {
         stubStaffLookup(CLAIMANT_ID, claimant());
         stubPublisherSuccess();
 
-        notifier().notifyClaimApproved(context(), claim()).await().indefinitely();
+        notifier()
+                .notifyClaimApproved(context(), claim(), List.of(CLAIMANT_ID))
+                .await()
+                .indefinitely();
 
         verify(notificationPublisher)
                 .enqueueWhatsappTemplate(
@@ -160,14 +222,54 @@ class StaffClaimNotificationNotifierTest {
                         any(NotificationTransaction.class), anyString(), anyString(), anyString(), anyMap());
     }
 
+    /** On a claim-on-behalf, both the real claimant and the staff who keyed it in get notified. */
+    @Test
+    void stagesApprovedDecisionForBothClaimantAndEntryStaffOnClaimOnBehalf() {
+        String entryStaffId = "ENTRY-1";
+        String entryStaffMobile = "+60198765432";
+        stubChannelSwitches(false, false, true);
+        stubBaseCurrency(BASE_CURRENCY);
+        stubStaffLookup(CLAIMANT_ID, claimant());
+        Staff entryStaff = new Staff();
+        entryStaff.setStaffId(entryStaffId);
+        entryStaff.setName("Dana");
+        entryStaff.setEmailCompany("entry@example.com");
+        entryStaff.setTelMobile(entryStaffMobile);
+        stubStaffLookup(entryStaffId, entryStaff);
+        stubPublisherSuccess();
+
+        StaffClaim claimOnBehalf = claim();
+        claimOnBehalf.setClaimStaffId(CLAIMANT_ID);
+        claimOnBehalf.setEntryStaff(entryStaffId);
+
+        notifier()
+                .notifyClaimApproved(context(), claimOnBehalf, List.of(CLAIMANT_ID, entryStaffId))
+                .await()
+                .indefinitely();
+
+        verify(notificationPublisher)
+                .enqueueWhatsappTemplate(
+                        any(NotificationTransaction.class),
+                        eq(APPROVER_MOBILE),
+                        eq(CLAIM_DECISION_TEMPLATE_NAME),
+                        eq(NOTIFICATION_LANGUAGE),
+                        anyMap());
+        verify(notificationPublisher)
+                .enqueueWhatsappTemplate(
+                        any(NotificationTransaction.class),
+                        eq(entryStaffMobile),
+                        eq(CLAIM_DECISION_TEMPLATE_NAME),
+                        eq(NOTIFICATION_LANGUAGE),
+                        anyMap());
+    }
+
     /** Skips every channel when the tenant has them all switched off. */
     @Test
     void skipsAllChannelsWhenTenantSwitchesAreOff() {
-        stubApproverParameter(APPROVER_ID);
         stubChannelSwitches(false, false, false);
 
         notifier()
-                .notifyClaimSubmitted(context(), claimDto(), CLAIM_ACTION_SUBMITTED)
+                .notifyClaimSubmitted(context(), claimDto(), CLAIM_ACTION_SUBMITTED, List.of(APPROVER_ID))
                 .await()
                 .indefinitely();
 
@@ -203,13 +305,6 @@ class StaffClaimNotificationNotifierTest {
     /** Wraps a mocked connection in the transaction envelope the notifier expects. */
     private NotificationTransaction context() {
         return new NotificationTransaction(org.mockito.Mockito.mock(SqlClient.class), COMPANY_ID);
-    }
-
-    /** Stubs the HR approver parameter the claim-submitted flow resolves. */
-    private void stubApproverParameter(String approverStaffId) {
-        when(systemParameterService.loadParameter(
-                        any(SqlClient.class), eq(StaffClaimNotificationNotifier.PARAM_HR_APPROVER)))
-                .thenReturn(Uni.createFrom().item(approverStaffId));
     }
 
     /** Stubs the tenant base currency parameter the amount rendering resolves. */
