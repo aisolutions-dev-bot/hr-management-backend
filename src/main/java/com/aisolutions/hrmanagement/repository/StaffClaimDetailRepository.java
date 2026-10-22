@@ -19,13 +19,15 @@ import java.util.List;
 @Slf4j
 public class StaffClaimDetailRepository {
 
+    private static final String ALL_COLUMNS =
+        "UniqId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, ClaimId, " +
+        "StaffId, ProjectId, ActivityCode, ProcessCode, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
+        "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
+        "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason, TaxType, TaxRate, TaxAmount, SubTotal, ServiceCharge";
+
     public Uni<StaffClaimDetail> findById(SqlClient client, Long id) {
         return client.preparedQuery(
-                "SELECT UniqId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, ClaimId, " +
-                "StaffId, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
-                "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
-                "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason, TaxType, TaxRate, TaxAmount, SubTotal, ServiceCharge " +
-                "FROM m18StaffClaimsDet WHERE UniqId = ?")
+                "SELECT " + ALL_COLUMNS + " FROM m18StaffClaimsDet WHERE UniqId = ?")
             .execute(Tuple.tuple().addValue(id))
             .map(rows -> rows.iterator().hasNext() ? toEntity(rows.iterator().next()) : null);
     }
@@ -33,10 +35,7 @@ public class StaffClaimDetailRepository {
     public Uni<List<StaffClaimDetail>> findByStaffAndDateRange(
             SqlClient client, String staffId, LocalDateTime from, LocalDateTime to) {
         return client.preparedQuery(
-                "SELECT UniqId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, ClaimId, " +
-                "StaffId, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
-                "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
-                "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason, TaxType, TaxRate, TaxAmount, SubTotal, ServiceCharge " +
+                "SELECT " + ALL_COLUMNS + " " +
                 "FROM m18StaffClaimsDet WHERE StaffId = ? AND ClaimDate >= ? AND ClaimDate < ? " +
                 "ORDER BY ClaimDate DESC")
             .execute(Tuple.tuple().addValue(staffId).addValue(from).addValue(to))
@@ -45,10 +44,7 @@ public class StaffClaimDetailRepository {
 
     public Uni<List<StaffClaimDetail>> findByStaff(SqlClient client, String staffId) {
         return client.preparedQuery(
-                "SELECT UniqId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, ClaimId, " +
-                "StaffId, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
-                "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
-                "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason, TaxType, TaxRate, TaxAmount, SubTotal, ServiceCharge " +
+                "SELECT " + ALL_COLUMNS + " " +
                 "FROM m18StaffClaimsDet WHERE StaffId = ? ORDER BY ClaimDate DESC")
             .execute(Tuple.tuple().addValue(staffId))
             .map(this::toList);
@@ -76,10 +72,7 @@ public class StaffClaimDetailRepository {
     /** All line items belonging to a claim header. */
     public Uni<List<StaffClaimDetail>> findByHeaderId(SqlClient client, Long claimId) {
         return client.preparedQuery(
-                "SELECT UniqId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, ClaimId, " +
-                "StaffId, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
-                "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
-                "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason, TaxType, TaxRate, TaxAmount, SubTotal, ServiceCharge " +
+                "SELECT " + ALL_COLUMNS + " " +
                 "FROM m18StaffClaimsDet WHERE ClaimId = ? ORDER BY ClaimDate ASC, UniqId ASC")
             .execute(Tuple.tuple().addValue(claimId))
             .map(this::toList);
@@ -99,10 +92,10 @@ public class StaffClaimDetailRepository {
     public Uni<StaffClaimDetail> save(SqlClient client, StaffClaimDetail entity) {
         return client.preparedQuery(
                 "INSERT INTO m18StaffClaimsDet (EntryStaff, EntryDate, LastEditStaff, LastEditDate, " +
-                "ClaimId, StaffId, ProjectId, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
+                "ClaimId, StaffId, ProjectId, ActivityCode, ProcessCode, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
                 "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
                 "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason, TaxType, TaxRate, TaxAmount, SubTotal, ServiceCharge) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .execute(Tuple.tuple()
                 .addValue(entity.getEntryStaff())
                 .addValue(entity.getEntryDate())
@@ -111,6 +104,8 @@ public class StaffClaimDetailRepository {
                 .addValue(entity.getClaimId())
                 .addValue(entity.getStaffId())
                 .addValue(entity.getProjectId())
+                .addValue(entity.getActivityCode())
+                .addValue(entity.getProcessCode())
                 .addValue(entity.getClaimType())
                 .addValue(entity.getClaimDate())
                 .addValue(entity.getClaimDescription())
@@ -141,7 +136,7 @@ public class StaffClaimDetailRepository {
     public Uni<StaffClaimDetail> update(SqlClient client, StaffClaimDetail entity) {
         return client.preparedQuery(
                 "UPDATE m18StaffClaimsDet SET EntryStaff = ?, EntryDate = ?, LastEditStaff = ?, " +
-                "LastEditDate = ?, ClaimId = ?, StaffId = ?, ProjectId = ?, ClaimType = ?, " +
+                "LastEditDate = ?, ClaimId = ?, StaffId = ?, ProjectId = ?, ActivityCode = ?, ProcessCode = ?, ClaimType = ?, " +
                 "ClaimDate = ?, ClaimDescription = ?, MerchantName = ?, ReceiptNumber = ?, " +
                 "ReceiptDate = ?, ReceiptAmount = ?, ClaimAmount = ?, Currency = ?, " +
                 "DetectedCurrency = ?, ExchangeRate = ?, Status = ?, ApprovedBy = ?, " +
@@ -154,6 +149,8 @@ public class StaffClaimDetailRepository {
                 .addValue(entity.getClaimId())
                 .addValue(entity.getStaffId())
                 .addValue(entity.getProjectId())
+                .addValue(entity.getActivityCode())
+                .addValue(entity.getProcessCode())
                 .addValue(entity.getClaimType())
                 .addValue(entity.getClaimDate())
                 .addValue(entity.getClaimDescription())
@@ -202,6 +199,8 @@ public class StaffClaimDetailRepository {
         e.setClaimId(row.getLong("ClaimId"));
         e.setStaffId(row.getString("StaffId"));
         e.setProjectId(row.getString("ProjectId"));
+        e.setActivityCode(row.getString("ActivityCode"));
+        e.setProcessCode(row.getString("ProcessCode"));
         e.setClaimType(row.getString("ClaimType"));
         e.setClaimDate(row.getLocalDateTime("ClaimDate"));
         e.setClaimDescription(row.getString("ClaimDescription"));

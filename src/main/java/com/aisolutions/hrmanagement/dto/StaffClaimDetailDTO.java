@@ -23,6 +23,8 @@ public class StaffClaimDetailDTO {
 
     private String staffId;
     private String projectId;
+    private String activityCode;
+    private String processCode;
     private String claimType;
     private LocalDateTime claimDate;
     private String claimDescription;

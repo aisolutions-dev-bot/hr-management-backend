@@ -48,6 +48,13 @@ public class StaffClaimDetail {
     @Column(name = "ProjectId", length = 25)
     private String projectId;
 
+    /** Mandatory when ProjectId is a real company project (not a free-typed claim title). */
+    @Column(name = "ActivityCode", length = 25)
+    private String activityCode;
+
+    @Column(name = "ProcessCode", length = 25)
+    private String processCode;
+
     @Column(name = "ClaimType", length = 25)
     private String claimType;
 

@@ -46,6 +46,8 @@ public class StaffClaimDetailService {
     // m18StaffClaimsDet column lengths — truncate inputs to match DDL
     private static final int LEN_STAFF_ID = 25;
     private static final int LEN_PROJECT_ID = 25;
+    private static final int LEN_ACTIVITY_CODE = 25;
+    private static final int LEN_PROCESS_CODE = 25;
     private static final int LEN_CLAIM_TYPE = 25;
     private static final int LEN_DESCRIPTION = 100;
     private static final int LEN_MERCHANT_NAME = 25;
@@ -58,6 +60,7 @@ public class StaffClaimDetailService {
     @Inject CurrentUserService currentUserService;
     @Inject CurrencyService currencyService;
     @Inject CompanyPoolManager companyPoolManager;
+    @Inject ClaimProjectCodeGuard projectCodeGuard;
 
     // ─────────────────────────────────────────────────────────
     //  CREATE
@@ -90,7 +93,8 @@ public class StaffClaimDetailService {
                     // 1. Persist the claim (in transaction)
                     companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
                         .flatMap(pool -> pool.withTransaction(tx ->
-                            claimRepo.save(tx, buildEntity(dto, staffId, originalAmount, conv))
+                            projectCodeGuard.requireCodes(tx, dto)
+                                .flatMap(ignored -> claimRepo.save(tx, buildEntity(dto, staffId, originalAmount, conv)))
                         ))
                     // 2. Upload photo to FTP (separate call — AttachmentService runs its own transaction)
                     .flatMap(saved -> {
@@ -224,6 +228,8 @@ public class StaffClaimDetailService {
         e.setStaffId(StringNormalizer.truncate(
                 staffIdOverride != null ? staffIdOverride : dto.getStaffId(), LEN_STAFF_ID));
         e.setProjectId(StringNormalizer.truncate(dto.getProjectId(), LEN_PROJECT_ID));
+        e.setActivityCode(StringNormalizer.truncate(dto.getActivityCode(), LEN_ACTIVITY_CODE));
+        e.setProcessCode(StringNormalizer.truncate(dto.getProcessCode(), LEN_PROCESS_CODE));
         e.setClaimType(StringNormalizer.truncate(dto.getClaimType(), LEN_CLAIM_TYPE));
         e.setClaimDate(dto.getClaimDate());
         e.setClaimDescription(StringNormalizer.truncate(dto.getClaimDescription(), LEN_DESCRIPTION));
@@ -281,6 +287,8 @@ public class StaffClaimDetailService {
         dto.setClaimId(e.getClaimId());
         dto.setStaffId(e.getStaffId());
         dto.setProjectId(e.getProjectId());
+        dto.setActivityCode(e.getActivityCode());
+        dto.setProcessCode(e.getProcessCode());
         dto.setClaimType(e.getClaimType());
         dto.setClaimDate(e.getClaimDate());
         dto.setClaimDescription(e.getClaimDescription());
