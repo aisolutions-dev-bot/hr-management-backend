@@ -18,10 +18,12 @@ import io.vertx.mutiny.sqlclient.Tuple;
 @ApplicationScoped
 public class ClaimSettingsRepository {
 
+    private static final String SCREEN_CLAIM_APPLICATION = "Claim Application";
+
     /** Active claim type names in dropdown order. */
     public Uni<List<String>> findActiveClaimTypes(SqlClient client) {
-        return client.preparedQuery("SELECT ClaimType FROM m18HRClaimType WHERE IsActive = 1 "
-                        + "ORDER BY SortOrder ASC, UniqId ASC")
+        return client.preparedQuery(
+                        "SELECT ClaimType FROM m18HRClaimType WHERE IsActive = 1 ORDER BY SortOrder ASC, UniqId ASC")
                 .execute()
                 .map(rows -> {
                     List<String> out = new ArrayList<>();
@@ -32,11 +34,11 @@ public class ClaimSettingsRepository {
                 });
     }
 
-    /** Active default rules, first match wins, as {conditionField, operator, conditionValue, targetField, defaultValue} in rule order. */
+    /** Active default rules in rule order (first match wins), keyed by the rule column names in camel case. */
     public Uni<List<Map<String, String>>> findActiveRules(SqlClient client) {
-        return client.preparedQuery("SELECT ConditionField, Operator, ConditionValue, TargetField, DefaultValue FROM m18HRSetting WHERE ScreenType = ? AND IsActive = 1 "
-                        + "ORDER BY RuleOrder ASC, UniqId ASC")
-                .execute(Tuple.of("Claim Application"))
+        return client.preparedQuery("SELECT ConditionField, Operator, ConditionValue, TargetField, DefaultValue "
+                        + "FROM m18HRSetting WHERE ScreenType = ? AND IsActive = 1 ORDER BY RuleOrder ASC, UniqId ASC")
+                .execute(Tuple.of(SCREEN_CLAIM_APPLICATION))
                 .map(rows -> {
                     List<Map<String, String>> out = new ArrayList<>();
                     for (Row r : rows) {
