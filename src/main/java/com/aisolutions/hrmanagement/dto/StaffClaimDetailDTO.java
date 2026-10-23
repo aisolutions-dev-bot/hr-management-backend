@@ -26,6 +26,7 @@ public class StaffClaimDetailDTO {
     private String activityCode;
     private String processCode;
     private String claimType;
+    private boolean corporateCreditCard;
     private LocalDateTime claimDate;
     private String claimDescription;
 

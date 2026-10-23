@@ -1,7 +1,10 @@
 package com.aisolutions.hrmanagement.resource.v1.config;
 
+import com.aisolutions.hrmanagement.repository.ClaimSettingsRepository;
 import com.aisolutions.hrmanagement.service.CurrencyService;
+import com.aisolutions.hrmanagement.service.CurrentUserService;
 import com.aisolutions.hrmanagement.service.SystemParameterService;
+import com.aisolutions.shared.tenancy.CompanyPoolManager;
 
 import io.smallrye.mutiny.Uni;
 import jakarta.inject.Inject;
@@ -39,11 +42,15 @@ public class ClaimConfigResource {
 
     @Inject SystemParameterService systemParameterService;
     @Inject CurrencyService currencyService;
+    @Inject ClaimSettingsRepository claimSettingsRepository;
+    @Inject CompanyPoolManager companyPoolManager;
+    @Inject CurrentUserService currentUserService;
 
     @GET
     public Uni<Response> getConfig() {
         return systemParameterService.loadBaseCurrency().flatMap(base ->
-            currencyService.listCurrenciesWithRates().map(currencies -> {
+            currencyService.listCurrenciesWithRates().flatMap(currencies ->
+                loadClaimSettings().map(settings -> {
                 // HashMap (not Map.of) so a null header rate serialises as null instead of throwing.
                 List<Map<String, Object>> currencyList = currencies.stream()
                         .map(c -> {
@@ -57,12 +64,33 @@ public class ClaimConfigResource {
                         .toList();
                 return Response.ok(Map.of(
                         "baseCurrency", base,
-                        "currencies", currencyList)).build();
-            })
+                        "currencies", currencyList,
+                        "claimTypes", settings.get("claimTypes"),
+                        "defaultRules", settings.get("defaultRules"))).build();
+            }))
         ).onFailure().recoverWithItem(err -> {
             System.err.println("[ClaimConfig] " + err.getMessage());
             return Response.serverError()
                     .entity(Map.of("error", err.getMessage())).build();
         });
+    }
+
+    /** Active claim types (dropdown order) and default rules; empty lists when the settings cannot be read. */
+    private Uni<Map<String, Object>> loadClaimSettings() {
+        return companyPoolManager.poolFor(currentUserService.getCurrentCompanyId())
+            .flatMap(pool -> claimSettingsRepository.findActiveClaimTypes(pool).flatMap(types ->
+                claimSettingsRepository.findActiveRules(pool).map(rules -> {
+                    Map<String, Object> out = new HashMap<>();
+                    out.put("claimTypes", types);
+                    out.put("defaultRules", rules);
+                    return out;
+                })))
+            .onFailure().recoverWithItem(err -> {
+                System.err.println("[ClaimConfig] claim settings unavailable: " + err.getMessage());
+                Map<String, Object> out = new HashMap<>();
+                out.put("claimTypes", List.of());
+                out.put("defaultRules", List.of());
+                return out;
+            });
     }
 }

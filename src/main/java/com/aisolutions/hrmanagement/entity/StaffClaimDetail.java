@@ -58,6 +58,10 @@ public class StaffClaimDetail {
     @Column(name = "ClaimType", length = 25)
     private String claimType;
 
+    /** Receipt paid with the company credit card. */
+    @Column(name = "CorporateCreditCard")
+    private boolean corporateCreditCard;
+
     @Column(name = "ClaimDate")
     private LocalDateTime claimDate;
 

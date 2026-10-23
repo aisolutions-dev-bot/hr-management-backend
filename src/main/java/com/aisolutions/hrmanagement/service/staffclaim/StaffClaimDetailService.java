@@ -231,6 +231,7 @@ public class StaffClaimDetailService {
         e.setActivityCode(StringNormalizer.truncate(dto.getActivityCode(), LEN_ACTIVITY_CODE));
         e.setProcessCode(StringNormalizer.truncate(dto.getProcessCode(), LEN_PROCESS_CODE));
         e.setClaimType(StringNormalizer.truncate(dto.getClaimType(), LEN_CLAIM_TYPE));
+        e.setCorporateCreditCard(dto.isCorporateCreditCard());
         e.setClaimDate(dto.getClaimDate());
         e.setClaimDescription(StringNormalizer.truncate(dto.getClaimDescription(), LEN_DESCRIPTION));
 
@@ -290,6 +291,7 @@ public class StaffClaimDetailService {
         dto.setActivityCode(e.getActivityCode());
         dto.setProcessCode(e.getProcessCode());
         dto.setClaimType(e.getClaimType());
+        dto.setCorporateCreditCard(e.isCorporateCreditCard());
         dto.setClaimDate(e.getClaimDate());
         dto.setClaimDescription(e.getClaimDescription());
         dto.setMerchantName(e.getMerchantName());

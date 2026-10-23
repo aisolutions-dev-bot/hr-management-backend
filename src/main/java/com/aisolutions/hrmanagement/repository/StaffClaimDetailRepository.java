@@ -21,7 +21,7 @@ public class StaffClaimDetailRepository {
 
     private static final String ALL_COLUMNS =
         "UniqId, EntryStaff, EntryDate, LastEditStaff, LastEditDate, ClaimId, " +
-        "StaffId, ProjectId, ActivityCode, ProcessCode, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
+        "StaffId, ProjectId, ActivityCode, ProcessCode, ClaimType, CorporateCreditCard, ClaimDate, ClaimDescription, MerchantName, " +
         "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
         "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason, TaxType, TaxRate, TaxAmount, SubTotal, ServiceCharge";
 
@@ -92,10 +92,10 @@ public class StaffClaimDetailRepository {
     public Uni<StaffClaimDetail> save(SqlClient client, StaffClaimDetail entity) {
         return client.preparedQuery(
                 "INSERT INTO m18StaffClaimsDet (EntryStaff, EntryDate, LastEditStaff, LastEditDate, " +
-                "ClaimId, StaffId, ProjectId, ActivityCode, ProcessCode, ClaimType, ClaimDate, ClaimDescription, MerchantName, " +
+                "ClaimId, StaffId, ProjectId, ActivityCode, ProcessCode, ClaimType, CorporateCreditCard, ClaimDate, ClaimDescription, MerchantName, " +
                 "ReceiptNumber, ReceiptDate, ReceiptAmount, ClaimAmount, Currency, DetectedCurrency, " +
                 "ExchangeRate, Status, ApprovedBy, ApprovedDate, RejectReason, TaxType, TaxRate, TaxAmount, SubTotal, ServiceCharge) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .execute(Tuple.tuple()
                 .addValue(entity.getEntryStaff())
                 .addValue(entity.getEntryDate())
@@ -107,6 +107,7 @@ public class StaffClaimDetailRepository {
                 .addValue(entity.getActivityCode())
                 .addValue(entity.getProcessCode())
                 .addValue(entity.getClaimType())
+                .addValue(entity.isCorporateCreditCard() ? 1 : 0)
                 .addValue(entity.getClaimDate())
                 .addValue(entity.getClaimDescription())
                 .addValue(entity.getMerchantName())
@@ -136,7 +137,7 @@ public class StaffClaimDetailRepository {
     public Uni<StaffClaimDetail> update(SqlClient client, StaffClaimDetail entity) {
         return client.preparedQuery(
                 "UPDATE m18StaffClaimsDet SET EntryStaff = ?, EntryDate = ?, LastEditStaff = ?, " +
-                "LastEditDate = ?, ClaimId = ?, StaffId = ?, ProjectId = ?, ActivityCode = ?, ProcessCode = ?, ClaimType = ?, " +
+                "LastEditDate = ?, ClaimId = ?, StaffId = ?, ProjectId = ?, ActivityCode = ?, ProcessCode = ?, ClaimType = ?, CorporateCreditCard = ?, " +
                 "ClaimDate = ?, ClaimDescription = ?, MerchantName = ?, ReceiptNumber = ?, " +
                 "ReceiptDate = ?, ReceiptAmount = ?, ClaimAmount = ?, Currency = ?, " +
                 "DetectedCurrency = ?, ExchangeRate = ?, Status = ?, ApprovedBy = ?, " +
@@ -152,6 +153,7 @@ public class StaffClaimDetailRepository {
                 .addValue(entity.getActivityCode())
                 .addValue(entity.getProcessCode())
                 .addValue(entity.getClaimType())
+                .addValue(entity.isCorporateCreditCard() ? 1 : 0)
                 .addValue(entity.getClaimDate())
                 .addValue(entity.getClaimDescription())
                 .addValue(entity.getMerchantName())
@@ -202,6 +204,7 @@ public class StaffClaimDetailRepository {
         e.setActivityCode(row.getString("ActivityCode"));
         e.setProcessCode(row.getString("ProcessCode"));
         e.setClaimType(row.getString("ClaimType"));
+        e.setCorporateCreditCard(row.getInteger("CorporateCreditCard") != 0);
         e.setClaimDate(row.getLocalDateTime("ClaimDate"));
         e.setClaimDescription(row.getString("ClaimDescription"));
         e.setMerchantName(row.getString("MerchantName"));
